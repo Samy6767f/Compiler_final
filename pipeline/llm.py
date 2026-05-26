@@ -33,11 +33,12 @@ GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY")
 
 MODELS = {
-    # Primary generation model (DeepSeek-V4-Flash)
-    "generation_primary": "deepseek-ai/deepseek-v4-flash",
+    # Primary generation model (DeepSeek-V4-Flash) – keep old key for compatibility
+    "generation": "deepseek-ai/deepseek-v4-flash",
+    "generation_primary": "deepseek-ai/deepseek-v4-flash",  # alias
     # Groq fast models (fallback)
-    "generation_groq_fast": "llama-3.1-8b-instant",      # fast, good quality
-    "generation_groq_quality": "llama-3.3-70b-versatile", # slower but better
+    "generation_groq_fast": "llama-3.1-8b-instant",
+    "generation_groq_quality": "llama-3.3-70b-versatile",
     # Fallback review model if Gemini fails
     "review_fallback": "meta/llama-3.2-3b-instruct",
 }
