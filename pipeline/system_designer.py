@@ -168,6 +168,8 @@ Required Format Shape:
                 logger.warning(f"Added missing required top‑level key: '{key}'")
         if not isinstance(data.get("permissions"), dict):
             data["permissions"] = {}
+
+        # --- Repair entities: ensure fields and relations are valid ---
         for entity in data.get("entities", []):
             if not isinstance(entity, dict):
                 continue
@@ -181,16 +183,32 @@ Required Format Shape:
                 entity["fields"].append("created_at:timestamp")
             if "updated_at" not in field_names:
                 entity["fields"].append("updated_at:timestamp")
+
+        # --- NEW: Repair incomplete flows (missing steps or actors) ---
+        for flow in data.get("flows", []):
+            if not isinstance(flow, dict):
+                continue
+            if "steps" not in flow:
+                flow["steps"] = []
+                logger.warning(f"Added missing 'steps' to flow '{flow.get('name', 'unknown')}'")
+            if "actors" not in flow:
+                flow["actors"] = []
+                logger.warning(f"Added missing 'actors' to flow '{flow.get('name', 'unknown')}'")
+
+        # --- Normalise relations ---
         for entity in data.get("entities", []):
             if not isinstance(entity, dict):
                 continue
             if "relations" not in entity or not isinstance(entity["relations"], list):
                 entity["relations"] = []
             entity["relations"] = [self._normalize_relation(r) for r in entity["relations"]]
+
+        # --- Validate against schema (non‑fatal) ---
         try:
             jsonschema.validate(instance=data, schema=self.SYSTEM_DESIGN_SCHEMA)
         except jsonschema.ValidationError as e:
             logger.warning(f"Schema validation warning (non‑fatal): {e}")
+
         return data
 
     def design_rule_based(self, intent: Dict) -> Dict:
@@ -242,7 +260,6 @@ Required Format Shape:
         roles = []
         for role in roles_data:
             name = role.get("name", "user") if isinstance(role, dict) else role
-            # Ensure name is a string (not list)
             if isinstance(name, list):
                 name = name[0] if name else "user"
             if name == "admin":
@@ -269,7 +286,6 @@ Required Format Shape:
         return permissions
 
     def _design_flows(self, entities: List[Dict], roles: List[Dict]) -> List[Dict]:
-        # Safely extract role names, ensuring they are strings
         role_names = []
         for r in roles:
             name = r.get("name")
@@ -293,7 +309,6 @@ Required Format Shape:
         return flows
 
     def _design_pages(self, entities: List[Dict], roles: List[Dict]) -> List[Dict]:
-        # Safely extract role names as strings
         role_names = []
         for r in roles:
             name = r.get("name")
