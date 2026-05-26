@@ -1,5 +1,6 @@
 import json
 import re
+import difflib  
 import logging
 from typing import Dict, List, Any, Optional
 from functools import lru_cache
@@ -8,7 +9,7 @@ from pipeline.llm import generate_with_llama, review_with_model
 logger = logging.getLogger("ai-compiler")
 
 # ----------------------------------------------------------------------
-# Keyword maps (unchanged)
+
 # ----------------------------------------------------------------------
 ENTITY_KEYWORDS = {
     'contact': 'contacts', 'user': 'users', 'customer': 'customers',
@@ -100,13 +101,13 @@ ROLE_PERMISSIONS = {
     'default': ["create", "read", "update"],
 }
 
-# Controlled app types for validation
+
 VALID_APP_TYPES = {'crm', 'ecommerce', 'saas', 'dashboard', 'marketplace', 'social', 'healthcare', 'booking', 'ride', 'delivery'}
 
 
 class IntentExtractor:
     def __init__(self):
-        # ✅ FIXED: Build patterns with KEYWORD as key, not role.
+      
         self.role_patterns = {keyword: re.compile(rf'\b{re.escape(keyword)}\b', re.IGNORECASE)
                               for keyword in ROLE_KEYWORDS}
         self.entity_patterns = {keyword: re.compile(rf'\b{re.escape(keyword)}\b', re.IGNORECASE)
@@ -257,16 +258,32 @@ class IntentExtractor:
 
     def _extract_entities(self, text: str) -> List[str]:
         entities = []
+        # Exact matching
         for keyword, entity_name in ENTITY_KEYWORDS.items():
             if self.entity_patterns[keyword].search(text):
                 entities.append(entity_name)
+        # If no exact matches, try fuzzy matching for misspellings
+        if not entities:
+            words = re.findall(r'\b\w+\b', text.lower())
+            for keyword, entity_name in ENTITY_KEYWORDS.items():
+                matches = difflib.get_close_matches(keyword, words, cutoff=0.8)
+                if matches:
+                    entities.append(entity_name)
         return self._dedupe_preserve_order(entities) if entities else ["items"]
 
     def _extract_roles(self, text: str) -> List[Dict]:
         roles_dict = {}
+        # Exact matching
         for keyword, role_name in ROLE_KEYWORDS.items():
             if self.role_patterns[keyword].search(text):
                 if role_name not in roles_dict:
+                    roles_dict[role_name] = self._get_role_permissions(role_name)
+        # If no exact matches, try fuzzy matching
+        if not roles_dict:
+            words = re.findall(r'\b\w+\b', text.lower())
+            for keyword, role_name in ROLE_KEYWORDS.items():
+                matches = difflib.get_close_matches(keyword, words, cutoff=0.8)
+                if matches and role_name not in roles_dict:
                     roles_dict[role_name] = self._get_role_permissions(role_name)
         roles = [{"name": r, "permissions": perms} for r, perms in roles_dict.items()]
         if not roles:
