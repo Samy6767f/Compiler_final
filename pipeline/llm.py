@@ -1,5 +1,5 @@
 """
-LLM layer — Hybrid: DeepSeek for generation, Gemini for ultra‑fast review
+LLM layer — Hybrid: DeepSeek + Groq for generation, Gemini for review
 Optimised for low latency, high accuracy, and free tier reliability.
 """
 
@@ -7,23 +7,37 @@ import time, logging, os, json, re
 from typing import Tuple
 from openai import OpenAI
 
-# Google Gemini SDK (pip install google-generativeai)
+# Google Gemini new SDK (pip install google-genai)
 try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
+    from google import genai
+    from google.genai import types
+    GEMINI_SDK_AVAILABLE = True
 except ImportError:
-    GEMINI_AVAILABLE = False
-    logging.getLogger("ai-compiler").warning("google-generativeai not installed. Review will fall back to NVIDIA.")
+    GEMINI_SDK_AVAILABLE = False
+    logging.getLogger("ai-compiler").warning("google-genai not installed. Review will fall back to NVIDIA.")
+
+# Groq SDK (pip install groq)
+try:
+    from groq import Groq
+    GROQ_SDK_AVAILABLE = True
+except ImportError:
+    GROQ_SDK_AVAILABLE = False
+    logging.getLogger("ai-compiler").warning("groq not installed. Generation fallback disabled.")
 
 logger = logging.getLogger("ai-compiler")
 
+# Environment variables
 NVIDIA_API_KEY  = os.environ.get("NVIDIA_API_KEY")
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY    = os.environ.get("GROQ_API_KEY")
 
 MODELS = {
-    # Fast generation model (DeepSeek-V4-Flash)
-    "generation": "deepseek-ai/deepseek-v4-flash",
+    # Primary generation model (DeepSeek-V4-Flash)
+    "generation_primary": "deepseek-ai/deepseek-v4-flash",
+    # Groq fast models (fallback)
+    "generation_groq_fast": "llama-3.1-8b-instant",      # fast, good quality
+    "generation_groq_quality": "llama-3.3-70b-versatile", # slower but better
     # Fallback review model if Gemini fails
     "review_fallback": "meta/llama-3.2-3b-instruct",
 }
@@ -32,7 +46,8 @@ MAX_RETRIES = 2
 RETRY_DELAY = 0.5
 
 _nvidia_client = None
-_gemini_model = None
+_gemini_client = None
+_groq_client = None
 
 def _get_nvidia_client() -> OpenAI:
     global _nvidia_client
@@ -42,12 +57,17 @@ def _get_nvidia_client() -> OpenAI:
         _nvidia_client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
     return _nvidia_client
 
-def _get_gemini_model():
-    global _gemini_model
-    if _gemini_model is None and GEMINI_API_KEY and GEMINI_AVAILABLE:
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel('models/gemini-2.0-flash-lite')
-    return _gemini_model
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None and GEMINI_API_KEY and GEMINI_SDK_AVAILABLE:
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _gemini_client
+
+def _get_groq_client():
+    global _groq_client
+    if _groq_client is None and GROQ_API_KEY and GROQ_SDK_AVAILABLE:
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+    return _groq_client
 
 # ── PROMPT COMPRESSION (same) ──────────────────────────────────────────────
 _FILLER = re.compile(
@@ -118,53 +138,84 @@ def _json_structurally_different(a: str, b: str) -> bool:
     except Exception:
         return a.strip() != b.strip()
 
-# ── GENERATION (unchanged, still using NVIDIA DeepSeek) ──────────────────────
-def _non_streaming_call(model: str, messages: list, temperature: float,
-                        max_tokens: int, timeout: int) -> str:
-    t0 = time.time()
+# ── GENERATION (NVIDIA DeepSeek + Groq fallback) ────────────────────────────
+def _call_nvidia(messages, max_tokens, timeout=45):
+    """Call NVIDIA DeepSeek."""
     client = _get_nvidia_client()
     response = client.chat.completions.create(
-        model=model,
+        model=MODELS["generation_primary"],
         messages=messages,
-        temperature=temperature,
+        temperature=0.0,
         top_p=1.0,
         max_tokens=max_tokens,
         stream=False,
         timeout=timeout,
     )
-    content = response.choices[0].message.content or ""
-    logger.info(f"[{model.split('/')[-1]}] {len(content)} chars in {time.time()-t0:.1f}s")
-    return content
+    return response.choices[0].message.content or ""
+
+def _call_groq(messages, max_tokens, model_name, timeout=30):
+    """Call Groq with specified model."""
+    client = _get_groq_client()
+    if client is None:
+        raise RuntimeError("Groq client unavailable")
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+    return response.choices[0].message.content or ""
 
 def generate_with_llama(prompt: str, system_message: str,
                         max_tokens: int = 2048) -> str:
+    """
+    Generate using DeepSeek-V4-Flash (primary). 
+    On failure (timeout/504/error), automatically fallback to Groq's fast model.
+    """
     compressed = compress_prompt(prompt)
     messages = [
         {"role": "system", "content": system_message},
         {"role": "user",   "content": compressed},
     ]
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
+
+    # Try NVIDIA DeepSeek first
+    try:
+        t0 = time.time()
+        raw = _call_nvidia(messages, max_tokens, timeout=45)
+        logger.info(f"[DeepSeek] {len(raw)} chars in {time.time()-t0:.1f}s")
+        if raw.strip():
+            return repair_json(raw)
+    except Exception as e:
+        logger.warning(f"DeepSeek generation failed: {e}. Falling back to Groq.")
+
+    # Fallback to Groq (fast model)
+    if GROQ_SDK_AVAILABLE and GROQ_API_KEY:
         try:
-            raw = _non_streaming_call(
-                MODELS["generation"], messages,
-                temperature=0.0,
-                max_tokens=max_tokens,
-                timeout=60
-            )
+            t0 = time.time()
+            raw = _call_groq(messages, max_tokens, MODELS["generation_groq_fast"], timeout=30)
+            logger.info(f"[Groq Fast] {len(raw)} chars in {time.time()-t0:.1f}s")
             if raw.strip():
                 return repair_json(raw)
         except Exception as e:
-            last_err = e
-            logger.warning(f"Gen attempt {attempt} failed: {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAY * attempt)
-    raise RuntimeError(f"Generation failed after {MAX_RETRIES} attempts: {last_err}")
+            logger.warning(f"Groq fast model failed: {e}. Trying quality model...")
 
-# ── REVIEW: Gemini first, fallback to NVIDIA ─────────────────────────────────
+        # Try Groq quality model as second fallback
+        try:
+            t0 = time.time()
+            raw = _call_groq(messages, max_tokens, MODELS["generation_groq_quality"], timeout=40)
+            logger.info(f"[Groq Quality] {len(raw)} chars in {time.time()-t0:.1f}s")
+            if raw.strip():
+                return repair_json(raw)
+        except Exception as e:
+            logger.warning(f"Groq quality model failed: {e}")
+
+    # If all LLMs fail, raise error (will be caught by system_designer -> rule-based)
+    raise RuntimeError("All generation providers failed (DeepSeek, Groq fast, Groq quality)")
+
+# ── REVIEW: Gemini first, fallback to NVIDIA (unchanged) ────────────────────
 def _fallback_review_with_nvidia(draft: str, review_task: str,
                                  max_tokens: int = 1024) -> Tuple[str, bool]:
-    """Fallback review using NVIDIA Llama 3.2 3B."""
     mini = minify_json(draft)
     system = (
         "JSON_CORRECTOR. Fix ONLY structural errors and missing required fields. "
@@ -176,12 +227,7 @@ def _fallback_review_with_nvidia(draft: str, review_task: str,
         {"role": "user",   "content": mini},
     ]
     try:
-        raw = _non_streaming_call(
-            MODELS["review_fallback"], messages,
-            temperature=0.0,
-            max_tokens=max_tokens,
-            timeout=30
-        )
+        raw = _call_nvidia_fallback_review(messages, max_tokens, timeout=30)
         if not raw.strip():
             return draft, False
         corrected = repair_json(raw)
@@ -193,15 +239,23 @@ def _fallback_review_with_nvidia(draft: str, review_task: str,
         logger.warning(f"Fallback review failed: {e}")
         return draft, False
 
+def _call_nvidia_fallback_review(messages, max_tokens, timeout=30):
+    client = _get_nvidia_client()
+    response = client.chat.completions.create(
+        model=MODELS["review_fallback"],
+        messages=messages,
+        temperature=0.0,
+        max_tokens=max_tokens,
+        stream=False,
+        timeout=timeout,
+    )
+    return response.choices[0].message.content or ""
+
 def review_with_model(draft: str, review_task: str,
                       max_tokens: int = 1024) -> Tuple[str, bool]:
-    """
-    Ultra‑fast review using Gemini 2.0 Flash‑Lite.
-    Falls back to NVIDIA Llama if Gemini unavailable or fails.
-    """
-    # Try Gemini first
-    gemini_model = _get_gemini_model()
-    if gemini_model is not None:
+    """Ultra‑fast review using Gemini 2.0 Flash‑Lite, falls back to NVIDIA."""
+    gemini_client = _get_gemini_client()
+    if gemini_client is not None:
         mini = minify_json(draft)
         prompt = f"""{review_task}
 Correct the following JSON. Output ONLY raw minified JSON, no markdown, no explanation.
@@ -211,12 +265,13 @@ JSON to correct:
 """
         try:
             t0 = time.time()
-            response = gemini_model.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.0,
-                    "max_output_tokens": max_tokens
-                }
+            response = gemini_client.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=max_tokens
+                )
             )
             corrected = response.text
             logger.info(f"[Gemini Review] {len(mini)}B → {len(corrected)}B in {time.time()-t0:.1f}s")
@@ -229,10 +284,11 @@ JSON to correct:
         except Exception as e:
             logger.warning(f"Gemini review failed: {e}. Falling back to NVIDIA.")
     else:
-        logger.warning("Gemini not available (missing key or SDK). Using fallback.")
+        if not GEMINI_API_KEY:
+            logger.warning("Gemini API key not set. Using fallback.")
+        elif not GEMINI_SDK_AVAILABLE:
+            logger.warning("Gemini SDK not installed. Run: pip install google-genai")
 
-    # Fallback to NVIDIA
     return _fallback_review_with_nvidia(draft, review_task, max_tokens)
 
-# Keep old alias for compatibility
 review_with_minimax = review_with_model
