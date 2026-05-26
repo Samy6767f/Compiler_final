@@ -1,5 +1,8 @@
-import json, re, logging
+import json
+import re
+import logging
 from typing import Dict, List, Any
+from pipeline.llm import _get_nvidia_client, MODELS
 
 logger = logging.getLogger("ai-compiler")
 
@@ -60,13 +63,78 @@ FEATURE_KEYWORDS = {
     'hybrid': 'Hybrid App',
 }
 
+
 class IntentExtractor:
     def extract(self, prompt: str) -> Dict[str, Any]:
-        return self.extract_rule_based(prompt)
-    
-    def extract_with_review(self, prompt: str) -> Dict[str, Any]:
-        draft = self.extract_rule_based(prompt)
+        """
+        Compiler Frontend: Converts unformatted natural language requirements 
+        into a semantic, high-fidelity Intermediate Representation (IR).
+        """
+        try:
+            client = _get_nvidia_client()
+            
+            system_instruction = (
+                "You are the structural Intent Extractor frontend of an enterprise software compiler.\n"
+                "Analyze the user requirements and output an un-collapsed Intermediate Representation (IR).\n\n"
+                "CRITICAL COMPILER ENFORCEMENT RULES:\n"
+                "1. DO NOT simplify roles. If a user asks for 'GlobalAdmin' and 'ClinicManager', do not merge them into a generic 'user' or 'admin'.\n"
+                "2. Extract custom database fields, tracking keys, structural hierarchies (e.g. self-referencing relationship joins), and complex conditional validation rules entirely.\n"
+                "3. Explicitly list any discovered third-party integrations under 'integrations'.\n"
+                "4. Populate the 'ambiguities' or 'assumptions' tracking blocks if critical configuration details are missing.\n\n"
+                "Output ONLY a raw, minified JSON object matching this exact schema structure without markdown wrappers or explanation block strings:\n"
+                "{\n"
+                "  \"app_name\": \"String\",\n"
+                "  \"app_type\": \"String\",\n"
+                "  \"features\": [\"List of unique application capabilities requiring functional layers\"],\n"
+                "  \"entities\": [\"List of all domain database tables/entities parsed\"],\n"
+                "  \"roles\": [{\"name\": \"role_name\", \"permissions\": [\"create\", \"read\", \"update\", \"delete\"]}],\n"
+                "  \"integrations\": [\"Third-party external APIs identified\"],\n"
+                "  \"ambiguities\": [],\n"
+                "  \"assumptions\": []\n"
+                "}"
+            )
+            
+            response = client.chat.completions.create(
+                model=MODELS["generation"],
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": f"User Prompt Requirements: {prompt}"}
+                ],
+                temperature=0.0,  # Ensure absolute compiler determinism
+                response_format={"type": "json_object"}
+            )
+            
+            raw_content = response.choices[0].message.content
+            
+            # Programmatically clean deepseek reasoning thought tags if leaked through JSON mode
+            if "</thought>" in raw_content:
+                raw_content = raw_content.split("</thought>")[-1].strip()
+                
+            intent_data = json.loads(raw_content)
+            return self._validate_and_heal_ir(intent_data)
+
+        except Exception as e:
+            logger.error(f"LLM Intent Extraction Compiler Fault, dropping back to rule-based parser: {e}")
+            return self.extract_rule_based(prompt)
+
+    def _validate_and_heal_ir(self, ir: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensures structural compiler types are consistent before passing to design engine."""
+        required_keys = ["features", "entities", "roles", "integrations", "ambiguities", "assumptions"]
+        for key in required_keys:
+            if key not in ir or not isinstance(ir[key], list):
+                ir[key] = []
         
+        if "app_name" not in ir or not ir["app_name"] or ir["app_name"] in ["MyApp", "App"]:
+            ir["app_name"] = "GeneratedEnterpriseApp"
+            
+        if "app_type" not in ir or not ir["app_type"]:
+            ir["app_type"] = "saas"
+            
+        return ir
+
+    def extract_with_review(self, prompt: str) -> Dict[str, Any]:
+        """Fallback wrapper loop supporting downstream minimax review validations."""
+        draft = self.extract(prompt)
         try:
             from pipeline.llm import review_with_model
             draft_json = json.dumps(draft)
@@ -76,13 +144,14 @@ class IntentExtractor:
             )
             if was_fixed:
                 draft = json.loads(corrected)
-                logger.info(f"Intent: MiniMax fixed={was_fixed}")
+                logger.info(f"Intent Refinement Complete: MiniMax fixed={was_fixed}")
         except Exception as e:
-            logger.warning(f"Intent review failed: {e}")
+            logger.warning(f"Intent verification check failed: {e}")
         
         return draft
     
     def extract_rule_based(self, prompt: str) -> Dict:
+        """Deterministic keyword parser preserved strictly for compiler fallback safety."""
         prompt_lower = prompt.lower()
         entities = self._extract_entities(prompt_lower)
         roles = self._extract_roles(prompt_lower)
@@ -120,10 +189,6 @@ class IntentExtractor:
         if "map" in prompt_lower:
             if "Map View" not in intent["features"]:
                 intent["features"].append("Map View")
-        
-        if "dark mode" in prompt_lower or "darkmode" in prompt_lower:
-            if "Dark Mode" not in intent["features"]:
-                intent["features"].append("Dark Mode")
         
         if "dark mode" in prompt_lower or "darkmode" in prompt_lower:
             if "Dark Mode" not in intent["features"]:
@@ -233,14 +298,14 @@ class IntentExtractor:
             'email': 'SendGrid', 'mail': 'SendGrid',
             'sms': 'Twilio',
             'auth': 'Auth0', 'auth0': 'Auth0',
-            'analytics': 'Mixpanel', 'analytics': 'Mixpanel',
+            'analytics': 'Mixpanel',
             'slack': 'Slack',
             'github': 'GitHub',
             'google': 'Google OAuth',
             'facebook': 'Facebook', 'instagram': 'Instagram',
             'mapbox': 'Mapbox', 'maps': 'Mapbox', 'map': 'Mapbox',
             'twilio': 'Twilio', 'sendgrid': 'SendGrid',
-            'stripe': 'Stripe', 'razorpay': 'Razorpay',
+            'razorpay': 'Razorpay',
         }
         return [name for key, name in integration_map.items() if key in text]
     
