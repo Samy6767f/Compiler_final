@@ -155,9 +155,22 @@ class IntentExtractor:
                     normalized_roles.append({"name": r, "permissions": ["read"]})
             data["roles"] = normalized_roles
 
-        # Normalize entities: ensure each entity name is a string
+        # Normalize entities: ensure each entity is a string (extract "name" from dict if needed)
         if "entities" in data and isinstance(data["entities"], list):
-            data["entities"] = [safe_title(e) if isinstance(e, str) else str(e) for e in data["entities"]]
+            normalized_entities = []
+            for e in data["entities"]:
+                if isinstance(e, dict):
+                    # Try to get the 'name' field, fallback to string conversion
+                    name = e.get("name")
+                    if isinstance(name, str):
+                        normalized_entities.append(name)
+                    else:
+                        normalized_entities.append(str(e))
+                elif isinstance(e, str):
+                    normalized_entities.append(e)
+                else:
+                    normalized_entities.append(str(e))
+            data["entities"] = normalized_entities
 
         # Ensure features are strings
         if "features" in data and isinstance(data["features"], list):
