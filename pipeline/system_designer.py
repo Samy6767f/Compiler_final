@@ -233,12 +233,17 @@ Required Format Shape:
 
         # --- ROLE SYNONYM NORMALIZATION (fix security mismatches) ---
         role_synonyms = {"administrator": "admin"}
+        # Normalize in pages and flows
         for page in data.get("pages", []):
             if "allowed_roles" in page:
                 page["allowed_roles"] = [role_synonyms.get(r, r) for r in page["allowed_roles"]]
         for flow in data.get("flows", []):
             if "actors" in flow:
                 flow["actors"] = [role_synonyms.get(r, r) for r in flow["actors"]]
+        # ALSO NORMALIZE ROLE NAMES IN THE ROLES LIST ITSELF
+        for role in data.get("roles", []):
+            if "name" in role:
+                role["name"] = role_synonyms.get(role["name"], role["name"])
 
         # --- Repair entities: ensure name, fields and relations are valid ---
         for idx, entity in enumerate(data.get("entities", [])):
