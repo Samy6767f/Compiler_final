@@ -159,7 +159,7 @@ All outputs are **valid, consistent, and executable** (simulation passes).
 
 ## 🧩 Repository Structure
 
-```
+
 ├── pipeline/
 │   ├── intent_extractor.py      # Stage 1: LLM + rule‑based IR
 │   ├── system_designer.py        # Stage 2: architecture design
@@ -215,5 +215,5 @@ MIT – feel free to use, modify, and extend.
 
 **Live URL:** [https://compilerfinal-production-3ccc.up.railway.app/](https://compilerfinal-production-3ccc.up.railway.app/)  
 **GitHub:** [https://github.com/Samy6767f/Compiler_final](https://github.com/Samy6767f/Compiler_final)
-```
+
 
