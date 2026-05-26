@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Dict, List
+from typing import Dict, List, Any
 import jsonschema
 
 logger = logging.getLogger("ai-compiler")
@@ -139,8 +139,41 @@ class SystemDesigner:
             logger.error(f"LLM design generation failed, calling code rule fallback mechanism: {e}")
             return self.design_rule_based(intent)
 
+    def _normalize_relation(self, rel: Any) -> Dict:
+        """
+        Convert a relation (string or object) into the required object format.
+        Handles string patterns like 'inventory.warehouse_id -> warehouses.id'
+        """
+        if isinstance(rel, dict):
+            # Ensure required keys exist with defaults
+            return {
+                "target": rel.get("target", ""),
+                "type": rel.get("type", "many-to-one"),
+                "foreign_key": rel.get("foreign_key", "")
+            }
+        if isinstance(rel, str):
+            # Parse: "inventory.warehouse_id -> warehouses.id"
+            parts = rel.split("->")
+            if len(parts) == 2:
+                left = parts[0].strip().split(".")
+                right = parts[1].strip().split(".")
+                foreign_key = left[-1] if len(left) > 1 else left[0]
+                target_table = right[0].strip() if right else ""
+                return {
+                    "target": target_table.title(),
+                    "type": "many-to-one",
+                    "foreign_key": foreign_key
+                }
+            # Fallback: treat whole string as foreign_key, target unknown
+            return {
+                "target": "Unknown",
+                "type": "many-to-one",
+                "foreign_key": rel
+            }
+        return {"target": "", "type": "many-to-one", "foreign_key": ""}
+
     def _parse_and_validate(self, raw: str) -> Dict:
-        """Parses raw text responses, removes markdown, injects standard fields, and validates against schema."""
+        """Parses raw text responses, removes markdown, injects standard fields, normalises relations, and validates."""
         # Remove markdown code fences
         text = re.sub(r"```(?:json)?\s*", "", raw).strip().replace("```", "").strip()
         
@@ -155,8 +188,12 @@ class SystemDesigner:
         
         # --- AUTOMATIC FIELD INJECTION: id, created_at, updated_at ---
         for entity in data.get("entities", []):
-            fields = entity.get("fields", [])
-            # Extract field names (before colon)
+            # Ensure fields is a list
+            if "fields" not in entity or not isinstance(entity["fields"], list):
+                entity["fields"] = []
+                logger.warning("Added missing 'fields' array to entity")
+            
+            fields = entity["fields"]
             field_names = [f.split(":")[0].strip() for f in fields]
             if "id" not in field_names:
                 entity["fields"].insert(0, "id:uuid")
@@ -164,6 +201,12 @@ class SystemDesigner:
                 entity["fields"].append("created_at:timestamp")
             if "updated_at" not in field_names:
                 entity["fields"].append("updated_at:timestamp")
+        
+        # --- NORMALISE RELATIONS: convert strings to objects ---
+        for entity in data.get("entities", []):
+            if "relations" not in entity or not isinstance(entity["relations"], list):
+                entity["relations"] = []
+            entity["relations"] = [self._normalize_relation(r) for r in entity["relations"]]
         
         # Strict schema validation with graceful error handling
         try:
@@ -313,4 +356,4 @@ class SystemDesigner:
                 "components": ["Form", "SubmitButton"]
             })
         
-        return pages  
+        return pages
