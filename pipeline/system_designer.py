@@ -173,11 +173,14 @@ class SystemDesigner:
         return {"target": "", "type": "many-to-one", "foreign_key": ""}
 
     def _parse_and_validate(self, raw: str) -> Dict:
-        """Parses raw text responses, removes markdown, injects standard fields, normalises relations, and validates."""
+        """
+        Parses raw text, injects fields, normalises relations,
+        and ensures all required top‑level keys exist.
+        """
         # Remove markdown code fences
         text = re.sub(r"```(?:json)?\s*", "", raw).strip().replace("```", "").strip()
         
-        # Extract JSON object if surrounded by extra text
+        # Extract JSON object
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
@@ -186,9 +189,21 @@ class SystemDesigner:
                 raise ValueError("No valid JSON object found in response")
             data = json.loads(match.group())
         
+        # --- ENSURE ALL REQUIRED TOP-LEVEL KEYS EXIST ---
+        required_keys = ["entities", "flows", "roles", "permissions", "pages"]
+        for key in required_keys:
+            if key not in data:
+                # Default value: empty list for arrays, empty dict for permissions
+                data[key] = [] if key != "permissions" else {}
+                logger.warning(f"Added missing required top-level key: '{key}'")
+        
+        # Ensure permissions is a dict (not list, None, etc.)
+        if not isinstance(data.get("permissions"), dict):
+            data["permissions"] = {}
+            logger.warning("Reset 'permissions' to empty dict (was not a dict)")
+        
         # --- AUTOMATIC FIELD INJECTION: id, created_at, updated_at ---
         for entity in data.get("entities", []):
-            # Ensure fields is a list
             if "fields" not in entity or not isinstance(entity["fields"], list):
                 entity["fields"] = []
                 logger.warning("Added missing 'fields' array to entity")
