@@ -4,7 +4,7 @@
 
 > **From natural language to executable application configuration – a multi‑stage compiler with built‑in validation, repair, and simulation.**
 ```
----
+
 ```
 ## 📌 Overview
 
@@ -17,7 +17,7 @@ This project is a **production‑ready AI compiler** that transforms open‑ende
 
 The system is designed as a **true compiler** – not a single‑prompt LLM hack. It follows a strict multi‑stage pipeline, includes an intelligent repair engine, simulates execution, and gracefully handles vague, conflicting, or incomplete inputs.
 ```
----
+
 ```
 ## 🚀 Live Demo
 
@@ -27,7 +27,7 @@ The system is designed as a **true compiler** – not a single‑prompt LLM hack
 
 Enter any app description (e.g., *“Build a task manager with projects, tasks, and team member roles”*) and receive a full JSON configuration in ~20‑30 seconds.
 ```
----
+
 
 ## 🧠 Architecture
 
@@ -74,7 +74,7 @@ User Input (Natural Language)
 
 Each stage is **independent, modular, and fallback‑aware**. If any LLM call fails (timeout, rate limit, invalid output), the system falls back to rule‑based logic, guaranteeing a **valid JSON output** for every request.
 
----
+
 ```
 ## ⚙️ Key Features
 
@@ -148,7 +148,7 @@ Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflict
 | **Repair attempts per request** | 0.8 |
 | **Most common failure type** | LLM timeout → rule‑based fallback (handled gracefully) |
 | **Cross‑layer consistency failures caught** | 12 / 20 prompts (all reported as warnings, not crashes) |
-```
+
 ```
 **Edge case examples:**
 
@@ -158,7 +158,7 @@ Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflict
 
 All outputs are **valid, consistent, and executable** (simulation passes).
 ```
----
+
 
 ## 🧩 Repository Structure
 
