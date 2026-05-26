@@ -149,6 +149,12 @@ Required Format Shape:
                 draft = self._parse_and_validate(corrected)
                 logger.info("Design Phase: Architecture optimized via validation verification flow.")
 
+            # --- NEW SAFETY CHECK: if design has too few entities, fallback to full rule‑based ---
+            intent_entity_count = len(intent.get("entities", []))
+            if intent_entity_count > 0 and len(draft.get("entities", [])) < intent_entity_count * 0.5:
+                logger.warning(f"LLM design has only {len(draft.get('entities', []))} of {intent_entity_count} intent entities. Using full rule‑based design.")
+                return self.design_rule_based(intent)
+
             return draft
 
         except Exception as e:
