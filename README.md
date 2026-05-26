@@ -9,10 +9,10 @@
 
 This project is a **production‑ready AI compiler** that transforms open‑ended user instructions into a **complete, validated, and executable** application blueprint. It outputs:
 
-- **Database schema** (tables, fields, relationships, foreign keys)
-- **REST API** (endpoints, methods, role‑based permissions)
-- **UI configuration** (pages, routes, components, allowed roles)
-- **Authentication & authorisation** (roles, permissions matrix)
+- Database schema** (tables, fields, relationships, foreign keys)
+- REST API (endpoints, methods, role‑based permissions)
+- UI configuration (pages, routes, components, allowed roles)
+- Authentication & authorisation (roles, permissions matrix)
 
 The system is designed as a **true compiler** – not a single‑prompt LLM hack. It follows a strict multi‑stage pipeline, includes an intelligent repair engine, simulates execution, and gracefully handles vague, conflicting, or incomplete inputs.
 
@@ -21,7 +21,7 @@ The system is designed as a **true compiler** – not a single‑prompt LLM hack
 ## 🚀 Live Demo
 
 **Test the compiler yourself:**  
-[https://compilerfinal-production-3ccc.up.railway.app/](https://compilerfinal-production-3ccc.up.railway.app/)
+  https://compilerfinal-production-3ccc.up.railway.app/
 
 Enter any app description (e.g., *“Build a task manager with projects, tasks, and team member roles”*) and receive a full JSON configuration in ~20‑30 seconds.
 
@@ -31,44 +31,43 @@ Enter any app description (e.g., *“Build a task manager with projects, tasks, 
 
 The compiler follows a **five‑stage pipeline**, mirroring traditional compiler design:
 
-```
-User Prompt
-    │
-    ▼
-┌─────────────────────────────────────┐
-│  Stage 1: Intent Extraction         │
-│  (LLM + rule‑based fallback)        │
-│  Output: Intermediate Representation│
-└─────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────┐
-│  Stage 2: System Design             │
-│  (entities, flows, roles, pages)    │
-│  Output: Architectural Design       │
-└─────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────┐
-│  Stage 3: Schema Generation         │
-│  (DB, API, UI, Auth)                │
-│  Output: Multi‑layer schemas        │
-└─────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────┐
-│  Stage 4: Validation & Repair       │
-│  (3‑level repair, cross‑layer)      │
-│  Output: Self‑healed schemas        │
-└─────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────┐
-│  Stage 5: Execution Simulation      │
-│  (20+ consistency checks)           │
-│  Output: can_execute + metrics      │
-└─────────────────────────────────────┘
-```
+User Input (Natural Language)
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    PIPELINE STAGES                          │
+├─────────────────────────────────────────────────────────────┤
+│  1. INTENT EXTRACTION                                       │
+│     - Parse entities, roles, features from text             │
+│     - Handle vague/underspecified inputs                    │
+│     - Make assumptions and document them                    │
+│     └─────────────────┬───────────────────────────────────┘
+│                       ▼                                     │
+│  2. SYSTEM DESIGN                                           │
+│     - Determine app type (CRM, CMS, Ecommerce, etc)         │
+│     - Design entity relationships                           │
+│     - Plan security architecture                            │
+│     - Detect third-party integrations                       │
+│     └─────────────────┬───────────────────────────────────┘
+│                       ▼                                     │
+│  3. SCHEMA GENERATION                                       │
+│     - Generate UI schema (pages, components)                │
+│     - Generate API schema (endpoints, methods)              │
+│     - Generate DB schema (tables, columns, relations)       │
+│     - Generate Auth rules (roles, permissions)              │
+│     └─────────────────┬───────────────────────────────────┘
+│                       ▼                                     │
+│  4. VALIDATION + REPAIR ENGINE                              │
+│     - Cross-layer consistency checks                        │
+│     - Schema validation against contracts                   │
+│     - Automatic repair of missing/invalid parts             │
+│     └─────────────────┬───────────────────────────────────┘
+│                       ▼                                     │
+│  5. EXECUTION RUNTIME                                       │
+│     - Execute generated schemas                             │
+│     - Validate API-DB-UI consistency                        │
+│     - Simulate API calls to verify correctness              │
+└─────────────────────────────────────────────────────────────┘
 
 Each stage is **independent, modular, and fallback‑aware**. If any LLM call fails (timeout, rate limit, invalid output), the system falls back to rule‑based logic, guaranteeing a **valid JSON output** for every request.
 
