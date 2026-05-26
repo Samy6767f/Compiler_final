@@ -138,7 +138,7 @@ If all checks pass, `can_execute: true` – the configuration is **executable wi
 ## 📈 Evaluation Framework
 
 Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflicting, incomplete).
-
+```
 | Metric | Value |
 |--------|-------|
 | **Success rate** (valid JSON output) | 100% |
@@ -147,7 +147,7 @@ Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflict
 | **Repair attempts per request** | 0.8 |
 | **Most common failure type** | LLM timeout → rule‑based fallback (handled gracefully) |
 | **Cross‑layer consistency failures caught** | 12 / 20 prompts (all reported as warnings, not crashes) |
-
+```
 **Edge case examples:**
 
 - Vague: `"Build something cool"` → default `Item` entity, `user` role, `Dashboard` page.
