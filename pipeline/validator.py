@@ -1,12 +1,21 @@
-import json, re, jsonschema, logging
-from typing import Dict, Tuple, List, Any, Optional
+import json
+import re
+import jsonschema
+import logging
+import hashlib
+from dataclasses import dataclass, field
+from typing import Dict, Tuple, List, Any, Optional, Callable
 from functools import lru_cache
+from datetime import datetime
 
 logger = logging.getLogger("ai-compiler")
 
+# Regex precompiled
 REPAIR_MARKDOWN_RE = re.compile(r"```(?:json)?\s*|\s*```")
 REPAIR_BRACE_RE = re.compile(r"\{[\s\S]*\}")
 REPAIR_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
+
+# Pluralization helpers
 PLURAL_IRREGULAR = {
     "person": "people", "man": "men", "woman": "women", "child": "children",
     "tooth": "teeth", "foot": "feet", "mouse": "mice", "ox": "oxen",
@@ -23,45 +32,85 @@ PLURAL_RULES = [
     (re.compile(r"ss$"), r"sses"),
 ]
 
+# Synonym mapping for key normalization
+KEY_SYNONYMS = {
+    "identifier": "id",
+    "userid": "user_id",
+    "useridentifier": "user_id",
+    "created": "created_at",
+    "updated": "updated_at",
+    "timestamp": "created_at",
+}
+
+
+@dataclass
 class ValidationResult:
-    def __init__(self, valid: bool, data: Any = None, errors: List[str] = None, repaired: bool = False, repairs_log: List[str] = None):
-        self.valid = valid
-        self.data = data
-        self.errors = errors or []
-        self.repaired = repaired
-        self.repairs_log = repairs_log or []
-    
+    valid: bool
+    data: Any = None
+    errors: List[str] = field(default_factory=list)
+    repaired: bool = False
+    repairs_log: List[str] = field(default_factory=list)
+
     def __repr__(self):
         status = "VALID" if self.valid else "INVALID"
-        if self.repaired: status += " (repaired)"
+        if self.repaired:
+            status += " (repaired)"
         return f"<ValidationResult {status} errors={self.errors}>"
+
 
 class Validator:
     _validator_cache: Dict[str, jsonschema.Draft7Validator] = {}
-    
+
     def __init__(self):
         self.schemas = {}
-    
-    def repair_json(self, raw: str) -> List[str]:
+        # Pluggable repair level registry
+        self.repair_strategies: Dict[int, Callable] = {
+            1: self._level1_repair,
+            2: self._level2_repair,
+            3: self._level3_repair,
+        }
+
+    @classmethod
+    @lru_cache(maxsize=32)
+    def _get_cached_validator(cls, schema_key: str, schema: Dict) -> jsonschema.Draft7Validator:
+        """Cached validator using SHA256 hash key."""
+        # schema_key is already the hash; we store the validator directly.
+        # This method is called with the hash and the schema, but we only need the hash for the cache key.
+        # However, lru_cache works on arguments, so we pass the hash as first argument.
+        # We store the validator using the schema itself (the second argument is ignored for key? careful)
+        # Better: use a single argument: the hash string, and store in a separate dict.
+        # Simpler: keep the previous dictionary approach but add @lru_cache to the method that returns the hash.
+        # Let's revert to the dictionary approach but add @lru_cache on a helper that computes the hash.
+        pass
+
+    # Keep the existing dictionary cache because lru_cache on classmethod with dict argument is tricky.
+    # Instead, we keep the SHA256 key and dictionary as before.
+    @classmethod
+    def _get_validator(cls, schema: Dict) -> jsonschema.Draft7Validator:
+        """Return cached validator for schema using SHA256 key."""
+        schema_key = hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest()
+        if schema_key not in cls._validator_cache:
+            cls._validator_cache[schema_key] = jsonschema.Draft7Validator(schema)
+        return cls._validator_cache[schema_key]
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _repair_json_cached(raw: str) -> Tuple[str, Tuple[str, ...]]:
+        """Cached JSON repair. Returns (repaired_json_string, repairs_log_tuple)."""
         repairs = []
-        raw = raw.strip()
-        raw = REPAIR_MARKDOWN_RE.sub("", raw).strip()
-        
+        raw = REPAIR_MARKDOWN_RE.sub("", raw.strip())
+
         texts = []
         if raw.startswith("["):
-            matches = REPAIR_ARRAY_RE.findall(raw)
-            texts.extend(matches)
+            texts.extend(REPAIR_ARRAY_RE.findall(raw))
         elif raw.startswith("{"):
-            matches = REPAIR_BRACE_RE.findall(raw)
-            texts.extend(matches)
+            texts.extend(REPAIR_BRACE_RE.findall(raw))
         else:
-            brace_matches = REPAIR_BRACE_RE.findall(raw)
-            array_matches = REPAIR_ARRAY_RE.findall(raw)
-            texts = brace_matches + array_matches
-        
+            texts = REPAIR_BRACE_RE.findall(raw) + REPAIR_ARRAY_RE.findall(raw)
+
         if not texts:
             texts = [raw]
-        
+
         repaired_texts = []
         for text in texts:
             try:
@@ -75,115 +124,152 @@ class Validator:
                     repaired_texts.append(fixed)
                 except ImportError:
                     repaired_texts.append(text)
-        
+
         if len(repaired_texts) > 1:
             repairs.append(f"Multiple JSON fragments found: {len(repaired_texts)} pieces")
-            return repaired_texts, repairs
-        
-        return repaired_texts, repairs
-    
+        result = repaired_texts[0] if repaired_texts else raw
+        return result, tuple(repairs)
+
+    def repair_json(self, raw: str) -> Tuple[List[str], List[str]]:
+        """Public wrapper – returns (list_of_json_strings, list_of_repair_logs)."""
+        repaired_str, repairs_tuple = self._repair_json_cached(raw)
+        return [repaired_str], list(repairs_tuple)
+
     def safe_json_parse(self, text: str) -> Tuple[bool, Any, str, List[str]]:
-        repairs = []
-        texts, repair_log = self.repair_json(text)
-        repairs.extend(repair_log)
-        
-        for attempt, t in enumerate(texts):
-            try:
-                return True, json.loads(t), "", repairs
-            except json.JSONDecodeError as e:
-                if attempt == len(texts) - 1:
-                    return False, None, str(e), repairs
-        return False, None, "Failed to parse JSON", repairs
-    
-    @classmethod
-    def _get_cached_validator(cls, schema: Dict) -> jsonschema.Draft7Validator:
-        schema_str = json.dumps(schema, sort_keys=True)
-        if schema_str not in cls._validator_cache:
-            cls._validator_cache[schema_str] = jsonschema.Draft7Validator(schema)
-        return cls._validator_cache[schema_str]
-    
-    def validate(self, data: Any, schema: Dict, level: int = 1) -> ValidationResult:
+        """Safely parse JSON with repair. Returns (success, data, error_msg, repair_logs)."""
+        repaired_str, repairs = self._repair_json_cached(text)
         try:
-            validator = self._get_cached_validator(schema)
+            return True, json.loads(repaired_str), "", list(repairs)
+        except json.JSONDecodeError as e:
+            return False, None, str(e), list(repairs)
+
+    def validate(self, data: Any, schema: Dict, level: int = 1, schema_name: str = "unnamed") -> ValidationResult:
+        """Validate data against schema, with repair attempts."""
+        try:
+            validator = self._get_validator(schema)
             validator.validate(data)
+            logger.debug(f"[{schema_name}] Validation passed without repairs.")
             return ValidationResult(valid=True, data=data)
         except jsonschema.ValidationError as e:
-            return self._repair_and_validate(data, schema, e, level)
-    
-    def _repair_and_validate(self, data: Any, schema: Dict, original_error: Exception, level: int) -> ValidationResult:
+            logger.info(f"[{schema_name}] Validation failed, attempting repair level {level}: {e}")
+            return self._repair_and_validate(data, schema, e, level, schema_name)
+
+    def _repair_and_validate(self, data: Any, schema: Dict, original_error: Exception,
+                             level: int, schema_name: str) -> ValidationResult:
         all_errors = [str(original_error)]
         repairs_log = []
-        
-        if level == 1:
-            repaired, log = self._level1_repair(data, schema)
-            repairs_log.extend(log)
-        elif level == 2:
-            repaired, log = self._level2_repair(data, schema)
-            repairs_log.extend(log)
-        else:
-            repaired, log = self._level3_repair(data, schema)
-            repairs_log.extend(log)
-        
+
+        # Use registry to get repair function
+        repair_fn = self.repair_strategies.get(level, self._level3_repair)
+        repaired, log = repair_fn(data, schema)
+        repairs_log.extend(log)
+
         if repaired is None:
-            return ValidationResult(valid=False, data=data, errors=all_errors, repairs_log=repairs_log)
-        
+            logger.error(f"[{schema_name}] Repair returned None, validation failed.")
+            return ValidationResult(valid=False, data=data, errors=all_errors,
+                                    repairs_log=repairs_log)
+
         try:
-            validator = self._get_cached_validator(schema)
+            validator = self._get_validator(schema)
             validator.validate(repaired)
-            logger.info(f"Validator repairs applied: {repairs_log}")
-            return ValidationResult(valid=True, data=repaired, repaired=True, repairs_log=repairs_log)
+            logger.info(f"[{schema_name}] Validation succeeded after repairs: {repairs_log}")
+            return ValidationResult(valid=True, data=repaired, repaired=True,
+                                    repairs_log=repairs_log)
         except jsonschema.ValidationError as e:
             all_errors.append(str(e))
-            logger.warning(f"Validator repair failed at level {level}: {all_errors}")
-            return ValidationResult(valid=False, data=repaired, errors=all_errors, repaired=True, repairs_log=repairs_log)
-    
+            logger.warning(f"[{schema_name}] Repair failed at level {level}: {all_errors}")
+            return ValidationResult(valid=False, data=repaired, errors=all_errors,
+                                    repaired=True, repairs_log=repairs_log)
+
+    # ---------- Repair Levels ----------
     def _level1_repair(self, data: Any, schema: Dict) -> Tuple[Any, List[str]]:
+        """Lightweight type coercion for primitives, arrays, objects."""
         repairs = []
         if isinstance(data, dict):
             result = {}
             for key, value in data.items():
                 if key in schema.get("properties", {}):
-                    expected = schema["properties"][key]["type"]
-                    if expected == "array" and not isinstance(value, list):
-                        result[key] = [value] if value else []
-                        repairs.append(f"Coerced '{key}' to array")
-                    elif expected == "object" and not isinstance(value, dict):
-                        result[key] = {"value": value} if value else {}
-                        repairs.append(f"Coerced '{key}' to object wrapper")
-                    else:
-                        result[key] = value
+                    expected = schema["properties"][key].get("type", "string")
+                    format_ = schema["properties"][key].get("format")
+                    coerced, log = self._coerce_type_verbose(value, expected, format_)
+                    if log:
+                        repairs.append(log)
+                    result[key] = coerced
                 else:
                     result[key] = value
             return result, repairs
         return data, repairs
-    
+
     def _level2_repair(self, data: Any, schema: Dict) -> Tuple[Any, List[str]]:
+        """Add missing required fields using schema defaults or enum fallback."""
         repairs = []
         if isinstance(data, dict):
             result = {}
             required = set(schema.get("required", []))
+            properties = schema.get("properties", {})
+
             for req in required:
                 if req not in data:
-                    default = self._default_for_type(schema["properties"].get(req, {}).get("type", "string"))
+                    prop = properties.get(req, {})
+                    default = prop.get("default")
+                    if default is None:
+                        # If enum exists, pick first value as fallback
+                        enum_vals = prop.get("enum")
+                        if enum_vals and len(enum_vals) > 0:
+                            default = enum_vals[0]
+                            repairs.append(f"Added missing required field '{req}' with first enum value {default}")
+                        else:
+                            default = self._default_for_type(prop.get("type", "string"))
+                            repairs.append(f"Added missing required field '{req}' with default {default}")
+                    else:
+                        repairs.append(f"Added missing required field '{req}' with schema default {default}")
                     result[req] = default
-                    repairs.append(f"Added missing required field '{req}' with default")
+
             for key, value in data.items():
-                if key in schema.get("properties", {}):
-                    prop_schema = schema["properties"][key]
-                    result[key], coerced = self._coerce_type_verbose(value, prop_schema.get("type", "string"))
-                    if coerced:
-                        repairs.append(coerced)
+                if key in properties:
+                    prop_schema = properties[key]
+                    expected = prop_schema.get("type", "string")
+                    format_ = prop_schema.get("format")
+                    coerced, log = self._coerce_type_verbose(value, expected, format_)
+                    if log:
+                        repairs.append(log)
+                    result[key] = coerced
                 else:
                     result[key] = value
             return result, repairs
         return data, repairs
-    
+
     def _level3_repair(self, data: Any, schema: Dict) -> Tuple[Any, List[str]]:
+        """Aggressive repair: normalize keys, apply synonyms, pluralization, drop unknown."""
         repaired, repairs = self._level2_repair(data, schema)
-        if not isinstance(repaired, dict):
-            return None, repairs
+        if isinstance(repaired, dict):
+            allowed_keys = set(schema.get("properties", {}).keys())
+            normalized_mapping = {}
+            for key in list(repaired.keys()):
+                # Normalization steps
+                norm = key.strip().lower()
+                # Apply synonyms
+                if norm in KEY_SYNONYMS:
+                    norm = KEY_SYNONYMS[norm]
+                    repairs.append(f"Applied synonym: '{key}' → '{norm}'")
+                # Check pluralization
+                if norm not in allowed_keys:
+                    plural = self._check_pluralization(norm)
+                    if plural in allowed_keys:
+                        norm = plural
+                        repairs.append(f"Pluralized: '{key}' → '{norm}'")
+                # If still not allowed, drop
+                if norm in allowed_keys:
+                    if norm != key:
+                        repairs.append(f"Normalized key '{key}' → '{norm}'")
+                    normalized_mapping[norm] = repaired.pop(key)
+                else:
+                    repairs.append(f"Dropped unknown field '{key}'")
+            # Update with normalized keys
+            repaired.update(normalized_mapping)
         return repaired, repairs
-    
+
+    # ---------- Helpers ----------
     def _default_for_type(self, ftype: str) -> Any:
         defaults = {
             "string": "", "array": [], "object": {},
@@ -191,83 +277,120 @@ class Validator:
             "null": None
         }
         return defaults.get(ftype, "")
-    
-    def _coerce_type_verbose(self, value: Any, ftype: str) -> Tuple[Any, Optional[str]]:
-        if ftype == "integer":
-            try:
-                return int(value), None
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Type coercion failed: {value} -> integer: {e}")
-                return 0, f"Coerced '{value}' to integer (was {type(value).__name__})"
-        if ftype == "number":
-            try:
-                return float(value), None
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Type coercion failed: {value} -> number: {e}")
-                return 0.0, f"Coerced '{value}' to float (was {type(value).__name__})"
-        if ftype == "boolean" and not isinstance(value, bool):
-            if isinstance(value, str):
-                return value.lower() in ("true", "1", "yes"), f"Coerced '{value}' to boolean"
-            return bool(value), f"Coerced '{value}' to boolean"
-        if ftype == "array" and not isinstance(value, list):
-            return [value] if value else [], f"Coerced '{value}' to array"
-        if ftype == "object" and not isinstance(value, dict):
-            return {"value": value} if value else {}, f"Coerced '{value}' to object"
+
+    def _coerce_type_verbose(self, value: Any, ftype: str, format_: Optional[str] = None) -> Tuple[Any, Optional[str]]:
+        """Coerce value to target type with format handling (e.g., date-time)."""
+        try:
+            # Special handling for date-time strings
+            if ftype == "string" and format_ == "date-time" and isinstance(value, str):
+                try:
+                    # Validate ISO format
+                    datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    return value, None
+                except ValueError:
+                    return "", f"Invalid date-time format '{value}', replaced with empty string"
+            if ftype == "integer":
+                if isinstance(value, (int, float)):
+                    return int(value), None
+                return int(value), f"Coerced '{value}' to integer"
+            if ftype == "number":
+                if isinstance(value, (int, float)):
+                    return float(value), None
+                return float(value), f"Coerced '{value}' to number"
+            if ftype == "boolean":
+                if isinstance(value, bool):
+                    return value, None
+                if isinstance(value, str):
+                    result = value.lower() in ("true", "1", "yes")
+                    return result, f"Coerced string '{value}' to boolean {result}"
+                return bool(value), f"Coerced {type(value).__name__} '{value}' to boolean"
+            if ftype == "array":
+                if isinstance(value, list):
+                    return value, None
+                return [value] if value is not None else [], f"Wrapped '{value}' in array"
+            if ftype == "object":
+                if isinstance(value, dict):
+                    return value, None
+                return {"value": value} if value is not None else {}, f"Wrapped '{value}' in object"
+        except Exception as e:
+            default = self._default_for_type(ftype)
+            return default, f"Failed coercion, applied default ({ftype}): {e}"
         return value, None
-    
+
     def _check_pluralization(self, word: str) -> str:
-        if word.lower() in PLURAL_IRREGULAR:
-            return PLURAL_IRREGULAR[word.lower()]
+        """Return plural form of a word."""
+        lower = word.lower()
+        if lower in PLURAL_IRREGULAR:
+            return PLURAL_IRREGULAR[lower]
         for pattern, replacement in PLURAL_RULES:
             if pattern.search(word):
                 return pattern.sub(replacement, word)
         return word + "s"
-    
-    def validate_cross_layer(self, design: Dict, schemas: Dict) -> List[str]:
+
+    # ---------- Cross-Layer Validation (Enhanced) ----------
+    def validate_cross_layer(self, design: Dict, schemas: Dict) -> Tuple[List[str], List[str]]:
+        """
+        Compiler‑semantic checks across DB, Auth, UI, and API layers.
+        Returns (errors, warnings).
+        """
         errors = []
         warnings = []
-        design_entities = {e["name"].lower(): e for e in design.get("entities", [])}
-        
-        if not isinstance(design.get("roles"), list):
-            errors.append("Design roles is not a list")
-            return errors
-        
-        db_tables = schemas.get("db", {}).get("tables", {})
-        auth_roles = set(schemas.get("auth", {}).get("roles", {}).keys())
+
+        db_schema = schemas.get("db", {})
+        db_tables = list(db_schema.get("tables", {}).keys())
+        relationships = db_schema.get("relationships", [])
+        auth_schema = schemas.get("auth", {})
+        auth_roles = set(auth_schema.get("roles", {}).keys())
+        ui_routing = schemas.get("ui", {}).get("routing", {})
         api_endpoints = schemas.get("api", {}).get("endpoints", [])
-        ui_routes = schemas.get("ui", {}).get("routing", {})
-        
-        all_roles_in_design = {r["name"] for r in design.get("roles", [])}
-        missing_auth_roles = all_roles_in_design - auth_roles
-        if missing_auth_roles and len(missing_auth_roles) < len(all_roles_in_design):
-            warnings.append(f"Some roles not in auth schema: {missing_auth_roles}")
-        
+        design_entities = {e["name"].lower() for e in design.get("entities", [])}
+
+        # 1. Multi‑table relational integrity
+        if len(db_tables) > 1 and len(relationships) == 0:
+            errors.append("Compiler Semantic Fault: Multi-table database schema with zero relational foreign keys.")
+
+        # 2. RBAC: UI roles must exist in Auth
+        used_roles = set()
+        for route, route_config in ui_routing.items():
+            allowed_roles = route_config.get("allowed_roles", [])
+            for role in allowed_roles:
+                used_roles.add(role)
+                if role not in auth_roles and role not in ["guest", "user"]:
+                    errors.append(f"Security Mismatch: UI route '{route}' allows role '{role}' missing from Auth.")
+
+        # 3. Unused roles warning
+        unused_roles = auth_roles - used_roles - {"guest", "user"}
+        if unused_roles:
+            warnings.append(f"Unused roles in Auth schema: {unused_roles}")
+
+        # 4. DB table ↔ design entity consistency
+        for table in db_tables:
+            if table.lower() not in design_entities:
+                warnings.append(f"DB table '{table}' has no matching entity in design layer.")
+
+        # 5. API endpoints must have at least one allowed role
+        for endpoint in api_endpoints:
+            roles = endpoint.get("roles", [])
+            if not roles:
+                warnings.append(f"API endpoint '{endpoint.get('path')}' has no allowed roles.")
+
+        # 6. API endpoint resources should exist in DB tables (basic)
         for endpoint in api_endpoints:
             path = endpoint.get("path", "")
             segments = [s for s in path.split("/") if s and not s.startswith("{")]
-            for seg in segments:
-                if seg in ("users", "trips", "drivers", "payments", "orders", "reviews", "ratings", 
-                          "notifications", "locations", "maps", "bags", "rides", "deliveries",
-                          "restaurants", "addresses", "products", "transactions", "subscriptions",
-                          "appointments", "prescriptions", "medical_records", "clinics", "staff",
-                          "tokens", "sessions", "audit_logs"):
-                    continue
-        
-        ui = schemas.get("ui", {})
-        if ui and not ui.get("routing") and db_tables:
-            warnings.append("UI routing is empty - should have routes for all pages")
-        
-        design_data = schemas.get("design", {}) if "design" in schemas else {}
-        features = design_data.get("features", []) + schemas.get("intent", {}).get("features", []) if "intent" in schemas else design_data.get("features", [])
-        features_lower = [f.lower() for f in features] if features else []
-        
-        if any("real-time" in f or "websocket" in f or "live" in f for f in features_lower):
-            warnings.append("Real-time updates requested - no WebSocket/SSE in schema")
-        
-        if features_lower and any("public" in f and "login" in f for f in features_lower):
-            if "guest" in auth_roles:
-                guest_perms = schemas.get("auth", {}).get("roles", {}).get("guest", [])
-                if "create" in guest_perms or "update" in guest_perms:
-                    warnings.append("Guest role has create/update perms - consider restricting to read-only for public pages")
-        
-        return errors + warnings
+            if segments:
+                last = segments[-1]
+                singular = last.rstrip("s")
+                if (singular.lower() not in [t.lower() for t in db_tables] and
+                        last.lower() not in [t.lower() for t in db_tables]):
+                    warnings.append(f"API endpoint '{path}' references resource not in DB tables.")
+
+        # 7. UI routes without corresponding API endpoints? (basic)
+        all_api_paths = {ep.get("path") for ep in api_endpoints}
+        for route in ui_routing.keys():
+            # Simple check: if route is like "/users" and API has "/users" or "/users/{id}"
+            if route != "/login" and route != "/dashboard":
+                if route not in all_api_paths and not any(route in p for p in all_api_paths):
+                    warnings.append(f"UI route '{route}' has no matching API endpoint.")
+
+        return errors, warnings
