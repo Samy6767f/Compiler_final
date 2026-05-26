@@ -76,12 +76,17 @@ class SchemaGenerator:
             if was_fixed:
                 try:
                     fixed = json.loads(corrected)
-                    draft = self._merge_schemas(draft, fixed)
-                    # Deduplicate endpoints after merging
-                    draft["api"]["endpoints"] = self._dedupe_endpoints(draft["api"]["endpoints"])
-                    logger.info("Schema: MiniMax applied fixes (merged)")
-                except json.JSONDecodeError:
-                    logger.warning("Schema: MiniMax output unparseable, keeping rule‑based draft")
+                    # Check that fixed is a dictionary (not list or other)
+                    if not isinstance(fixed, dict):
+                        logger.warning(f"LLM review output is not a dict (type: {type(fixed).__name__}), skipping merge.")
+                    else:
+                        draft = self._merge_schemas(draft, fixed)
+                        # Deduplicate endpoints after merging
+                        draft["api"]["endpoints"] = self._dedupe_endpoints(draft["api"]["endpoints"])
+                        logger.info("Schema: MiniMax applied fixes (merged)")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Schema: MiniMax output unparseable: {e}. Raw: {corrected[:200]}")
+                    # fall through – keep rule‑based draft
         except Exception as e:
             logger.warning(f"Schema LLM review failed (using rule‑based): {e}")
 
@@ -234,6 +239,7 @@ class SchemaGenerator:
     def _merge_schemas(self, base: Dict, incoming: Dict) -> Dict:
         """Merge incoming fixes into base, preserving existing fields but NOT adding new tables or endpoints."""
         if not isinstance(incoming, dict):
+            logger.warning(f"Expected dict for incoming schemas, got {type(incoming).__name__}. Skipping merge.")
             return base
 
         # DB tables: only merge fields into existing tables; ignore new tables
