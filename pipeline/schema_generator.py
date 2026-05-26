@@ -198,6 +198,35 @@ class SchemaGenerator:
             ]
             logger.warning("No entities found, added default health endpoint")
 
+        # --- Auto‑detect foreign keys from field names ---
+        table_names = {t.lower(): t for t in schemas["db"]["tables"].keys()}
+        for table_name, table_data in schemas["db"]["tables"].items():
+            fields = table_data.get("fields", {})
+            for field_name in fields:
+                if field_name.endswith("_id") and field_name != "id":
+                    target_base = field_name[:-3]  # e.g., "user_id" -> "user"
+                    target_plural = target_base + "s"
+                    target_singular = target_base
+                    target_table = None
+                    if target_plural in table_names:
+                        target_table = table_names[target_plural]
+                    elif target_singular in table_names:
+                        target_table = table_names[target_singular]
+                    if target_table:
+                        existing = any(
+                            r.get("from") == table_name and
+                            r.get("to") == target_table and
+                            r.get("foreign_key") == field_name
+                            for r in schemas["db"]["relationships"]
+                        )
+                        if not existing:
+                            schemas["db"]["relationships"].append({
+                                "from": table_name,
+                                "to": target_table,
+                                "type": "many-to-one",
+                                "foreign_key": field_name
+                            })
+
         # Deduplicate endpoints before returning
         schemas["api"]["endpoints"] = self._dedupe_endpoints(schemas["api"]["endpoints"])
         return schemas
