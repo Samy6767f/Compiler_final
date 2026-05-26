@@ -76,17 +76,14 @@ class SchemaGenerator:
             if was_fixed:
                 try:
                     fixed = json.loads(corrected)
-                    # Check that fixed is a dictionary (not list or other)
                     if not isinstance(fixed, dict):
                         logger.warning(f"LLM review output is not a dict (type: {type(fixed).__name__}), skipping merge.")
                     else:
                         draft = self._merge_schemas(draft, fixed)
-                        # Deduplicate endpoints after merging
                         draft["api"]["endpoints"] = self._dedupe_endpoints(draft["api"]["endpoints"])
                         logger.info("Schema: MiniMax applied fixes (merged)")
                 except json.JSONDecodeError as e:
                     logger.warning(f"Schema: MiniMax output unparseable: {e}. Raw: {corrected[:200]}")
-                    # fall through – keep rule‑based draft
         except Exception as e:
             logger.warning(f"Schema LLM review failed (using rule‑based): {e}")
 
@@ -147,7 +144,6 @@ class SchemaGenerator:
                     "primary_key": fname == "id",
                     "nullable":    fname not in ("id", "created_at", "updated_at"),
                 }
-            # Guarantee id + timestamps
             if "id" not in table_fields:
                 table_fields["id"] = {"type": "uuid", "primary_key": True, "nullable": False}
             for ts in ("created_at", "updated_at"):
@@ -209,7 +205,7 @@ class SchemaGenerator:
             fields = table_data.get("fields", {})
             for field_name in fields:
                 if field_name.endswith("_id") and field_name != "id":
-                    target_base = field_name[:-3]  # e.g., "user_id" -> "user"
+                    target_base = field_name[:-3]
                     target_plural = target_base + "s"
                     target_singular = target_base
                     target_table = None
@@ -237,7 +233,7 @@ class SchemaGenerator:
         return schemas
 
     def _merge_schemas(self, base: Dict, incoming: Dict) -> Dict:
-        """Merge incoming fixes into base, preserving existing fields but NOT adding new tables or endpoints."""
+        """Merge incoming fixes into base, merging roles for existing endpoints."""
         if not isinstance(incoming, dict):
             logger.warning(f"Expected dict for incoming schemas, got {type(incoming).__name__}. Skipping merge.")
             return base
@@ -253,20 +249,33 @@ class SchemaGenerator:
             else:
                 logger.debug(f"Ignoring new table '{table_name}' added by review (not in original design)")
 
-        # Relationships: only append new ones (no harm)
+        # Relationships: append new ones
         for rel in incoming.get("db", {}).get("relationships", []):
             if rel not in base["db"]["relationships"]:
                 base["db"]["relationships"].append(rel)
 
-        # API endpoints: only keep those where the table exists in base DB
+        # API endpoints: merge roles for existing endpoints, otherwise append
         base_tables_set = set(base["db"]["tables"].keys())
         for ep in incoming.get("api", {}).get("endpoints", []):
             table = ep.get("table")
-            if table in base_tables_set:
-                if ep not in base["api"]["endpoints"]:
-                    base["api"]["endpoints"].append(ep)
+            if table not in base_tables_set:
+                logger.debug(f"Ignoring endpoint for non‑existent table '{table}'")
+                continue
+            path = ep.get("path")
+            method = ep.get("method")
+            # Check if endpoint already exists in base
+            found = None
+            for existing in base["api"]["endpoints"]:
+                if existing.get("path") == path and existing.get("method") == method:
+                    found = existing
+                    break
+            if found:
+                # Merge roles (union)
+                new_roles = set(found.get("roles", [])) | set(ep.get("roles", []))
+                found["roles"] = list(new_roles)
+                logger.debug(f"Merged roles for {method} {path}")
             else:
-                logger.debug(f"Ignoring endpoint for non‑existent table '{table}' added by review")
+                base["api"]["endpoints"].append(ep)
 
         # UI pages and routing: add only if not already present
         for page_name, page_data in incoming.get("ui", {}).get("pages", {}).items():
