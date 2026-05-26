@@ -6,74 +6,76 @@ import jsonschema
 
 logger = logging.getLogger("ai-compiler")
 
-SYSTEM_Design_SCHEMA = {  # (same as yours, unchanged)
-    "type": "object",
-    "required": ["entities", "flows", "roles", "permissions", "pages"],
-    "properties": {
-        "entities": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["name", "fields", "relations"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "fields": {"type": "array", "items": {"type": "string"}},
-                    "relations": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "required": ["target", "type", "foreign_key"],
-                            "properties": {
-                                "target": {"type": "string"},
-                                "type": {"type": "string"},
-                                "foreign_key": {"type": "string"}
+class SystemDesigner:
+    # Move schema inside the class to avoid global scope issues
+    SYSTEM_DESIGN_SCHEMA = {
+        "type": "object",
+        "required": ["entities", "flows", "roles", "permissions", "pages"],
+        "properties": {
+            "entities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "fields", "relations"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "fields": {"type": "array", "items": {"type": "string"}},
+                        "relations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["target", "type", "foreign_key"],
+                                "properties": {
+                                    "target": {"type": "string"},
+                                    "type": {"type": "string"},
+                                    "foreign_key": {"type": "string"}
+                                }
                             }
                         }
                     }
                 }
-            }
-        },
-        "flows": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["name", "steps", "actors"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "steps": {"type": "array", "items": {"type": "string"}},
-                    "actors": {"type": "array", "items": {"type": "string"}}
+            },
+            "flows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "steps", "actors"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "steps": {"type": "array", "items": {"type": "string"}},
+                        "actors": {"type": "array", "items": {"type": "string"}}
+                    }
                 }
-            }
-        },
-        "roles": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["name", "permissions"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "permissions": {"type": "array", "items": {"type": "string"}}
+            },
+            "roles": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "permissions"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "permissions": {"type": "array", "items": {"type": "string"}}
+                    }
                 }
-            }
-        },
-        "permissions": {"type": "object"},
-        "pages": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["name", "route", "allowed_roles", "components"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "route": {"type": "string"},
-                    "allowed_roles": {"type": "array", "items": {"type": "string"}},
-                    "components": {"type": "array", "items": {"type": "string"}}
+            },
+            "permissions": {"type": "object"},
+            "pages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "route", "allowed_roles", "components"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "route": {"type": "string"},
+                        "allowed_roles": {"type": "array", "items": {"type": "string"}},
+                        "components": {"type": "array", "items": {"type": "string"}}
+                    }
                 }
             }
         }
     }
-}
 
-SYSTEM_DESIGN_PROMPT = """You are Stage 2 of an AI Compiler — System Designer.
+    SYSTEM_DESIGN_PROMPT = """You are Stage 2 of an AI Compiler — System Designer.
 Your task is to convert an application intent structure into a detailed architectural design framework.
 
 Generate complete application architecture components as valid JSON matching the system schema guidelines.
@@ -87,38 +89,27 @@ Ensure:
 Required Format Shape:
 {"entities":[{"name":"EntityName","fields":["id:uuid","name:string","created_at:timestamp"],"relations":[]}],"flows":[{"name":"FlowName","steps":["step1","step2"],"actors":["role"]}],"roles":[{"name":"rolename","permissions":["read","write"]}],"permissions":{"permName":["role"]},"pages":[{"name":"PageName","route":"/route","allowed_roles":["role"],"components":["Component"]}]}"""
 
-
-class SystemDesigner:
     def design(self, intent: Dict) -> Dict:
-        """Main compilation entry point."""
         return self.design_llm(intent)
 
     def design_llm(self, intent: Dict) -> Dict:
-        """LLM‑driven synthesis."""
         try:
             from pipeline.llm import _get_nvidia_client, MODELS
             client = _get_nvidia_client()
-
             messages = [
-                {"role": "system", "content": SYSTEM_DESIGN_PROMPT},
+                {"role": "system", "content": self.SYSTEM_DESIGN_PROMPT},
                 {"role": "user", "content": f"Application Intent Map to Expand: {json.dumps(intent)}"}
             ]
-
             response = client.chat.completions.create(
                 model=MODELS["generation"],
                 messages=messages,
                 temperature=0.0,
                 response_format={"type": "json_object"}
             )
-
             raw_content = response.choices[0].message.content
-
             if "</thought>" in raw_content:
                 raw_content = raw_content.split("</thought>")[-1].strip()
-
             draft = self._parse_and_validate(raw_content)
-
-            # Downstream review flow
             try:
                 from pipeline.llm import review_with_model
                 draft_json = json.dumps(draft)
@@ -131,15 +122,12 @@ class SystemDesigner:
                     logger.info("Design Phase: Architecture optimized via validation verification flow.")
             except Exception as e:
                 logger.warning(f"Downstream design check skipped: {e}")
-
             return draft
-
         except Exception as e:
             logger.error(f"LLM design generation failed, falling back to rule‑based: {e}")
             return self.design_rule_based(intent)
 
     def _normalize_relation(self, rel: Any) -> Dict:
-        """Convert string relation to object, and ensure dict has required keys."""
         if isinstance(rel, dict):
             return {
                 "target": rel.get("target", ""),
@@ -158,19 +146,11 @@ class SystemDesigner:
                     "type": "many-to-one",
                     "foreign_key": foreign_key
                 }
-            return {
-                "target": "Unknown",
-                "type": "many-to-one",
-                "foreign_key": rel
-            }
+            return {"target": "Unknown", "type": "many-to-one", "foreign_key": rel}
         return {"target": "", "type": "many-to-one", "foreign_key": ""}
 
     def _parse_and_validate(self, raw: str) -> Dict:
-        """Parse, repair, inject missing keys, normalise relations, validate."""
-        # Clean markdown
         text = re.sub(r"```(?:json)?\s*", "", raw).strip().replace("```", "").strip()
-
-        # Attempt to parse JSON
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
@@ -178,28 +158,16 @@ class SystemDesigner:
             if match:
                 data = json.loads(match.group())
             else:
-                # Fallback: return minimal valid structure
-                logger.error("No JSON object found, using empty structure")
                 data = {}
-
-        # Safety: ensure data is a dict (not list, not None)
         if not isinstance(data, dict):
-            logger.warning(f"Parsed data is {type(data).__name__}, wrapping in dict")
             data = {"entities": []}
-
-        # --- Ensure all required top‑level keys exist ---
         required_keys = ["entities", "flows", "roles", "permissions", "pages"]
         for key in required_keys:
             if key not in data:
                 data[key] = [] if key != "permissions" else {}
                 logger.warning(f"Added missing required top‑level key: '{key}'")
-
-        # Ensure permissions is always a dict
         if not isinstance(data.get("permissions"), dict):
             data["permissions"] = {}
-            logger.warning("Reset 'permissions' to empty dict")
-
-        # --- Inject standard fields into each entity ---
         for entity in data.get("entities", []):
             if not isinstance(entity, dict):
                 continue
@@ -213,24 +181,18 @@ class SystemDesigner:
                 entity["fields"].append("created_at:timestamp")
             if "updated_at" not in field_names:
                 entity["fields"].append("updated_at:timestamp")
-
-        # --- Normalise relations (convert string to object) ---
         for entity in data.get("entities", []):
             if not isinstance(entity, dict):
                 continue
             if "relations" not in entity or not isinstance(entity["relations"], list):
                 entity["relations"] = []
             entity["relations"] = [self._normalize_relation(r) for r in entity["relations"]]
-
-        # --- Validate against schema (non‑fatal) ---
         try:
-            jsonschema.validate(instance=data, schema=SYSTEM_DESIGN_SCHEMA)
+            jsonschema.validate(instance=data, schema=self.SYSTEM_DESIGN_SCHEMA)
         except jsonschema.ValidationError as e:
             logger.warning(f"Schema validation warning (non‑fatal): {e}")
-
         return data
 
-    # ---------- Rule‑based fallback (unchanged, works fine) ----------
     def design_rule_based(self, intent: Dict) -> Dict:
         entities = self._design_entities(intent)
         roles = self._design_roles(intent)
@@ -243,7 +205,6 @@ class SystemDesigner:
         }
 
     def _design_entities(self, intent: Dict) -> List[Dict]:
-        # ... (your existing implementation, unchanged) ...
         entities = []
         entity_names = intent.get("entities", [])
         base_fields = {
@@ -281,6 +242,9 @@ class SystemDesigner:
         roles = []
         for role in roles_data:
             name = role.get("name", "user") if isinstance(role, dict) else role
+            # Ensure name is a string (not list)
+            if isinstance(name, list):
+                name = name[0] if name else "user"
             if name == "admin":
                 perms = ["create", "read", "update", "delete", "admin"]
             elif name == "guest":
@@ -293,7 +257,9 @@ class SystemDesigner:
     def _generate_permissions(self, roles: List[Dict]) -> Dict:
         permissions = {}
         for role in roles:
-            role_name = role["name"]
+            role_name = role.get("name", "")
+            if not isinstance(role_name, str):
+                role_name = str(role_name)
             perms = role.get("permissions", [])
             for perm in perms:
                 if perm not in permissions:
@@ -303,14 +269,39 @@ class SystemDesigner:
         return permissions
 
     def _design_flows(self, entities: List[Dict], roles: List[Dict]) -> List[Dict]:
+        # Safely extract role names, ensuring they are strings
+        role_names = []
+        for r in roles:
+            name = r.get("name")
+            if isinstance(name, list):
+                name = name[0] if name else "unknown"
+            elif not isinstance(name, str):
+                name = str(name)
+            role_names.append(name)
         flows = [
-            {"name": "User Authentication", "steps": ["POST /auth/login", "Validate credentials", "Return JWT token"], "actors": ["guest"]},
-            {"name": "Manage Resources", "steps": ["GET /{resource}", "POST /{resource}", "PUT /{resource}/:id", "DELETE /{resource}/:id"], "actors": list(set(r["name"] for r in roles))}
+            {
+                "name": "User Authentication",
+                "steps": ["POST /auth/login", "Validate credentials", "Return JWT token"],
+                "actors": ["guest"]
+            },
+            {
+                "name": "Manage Resources",
+                "steps": ["GET /{resource}", "POST /{resource}", "PUT /{resource}/:id", "DELETE /{resource}/:id"],
+                "actors": list(set(role_names)) if role_names else ["user"]
+            }
         ]
         return flows
 
     def _design_pages(self, entities: List[Dict], roles: List[Dict]) -> List[Dict]:
-        role_names = [r["name"] for r in roles]
+        # Safely extract role names as strings
+        role_names = []
+        for r in roles:
+            name = r.get("name")
+            if isinstance(name, list):
+                name = name[0] if name else "user"
+            elif not isinstance(name, str):
+                name = str(name)
+            role_names.append(name)
         pages = [
             {"name": "Login", "route": "/login", "allowed_roles": ["guest"], "components": ["Form"]},
             {"name": "Dashboard", "route": "/dashboard", "allowed_roles": role_names if role_names else ["user"], "components": ["StatsCard", "Table"]}
@@ -324,6 +315,16 @@ class SystemDesigner:
                 plural = lower[:-1] + "ies"
             else:
                 plural = lower + "s"
-            pages.append({"name": f"{entity_name} List", "route": f"/{plural}", "allowed_roles": role_names if role_names else ["user", "admin"], "components": ["Table", "SearchInput", "CreateButton"]})
-            pages.append({"name": f"{entity_name} Form", "route": f"/{plural}/new", "allowed_roles": role_names if "admin" in role_names else role_names, "components": ["Form", "SubmitButton"]})
+            pages.append({
+                "name": f"{entity_name} List",
+                "route": f"/{plural}",
+                "allowed_roles": role_names if role_names else ["user", "admin"],
+                "components": ["Table", "SearchInput", "CreateButton"]
+            })
+            pages.append({
+                "name": f"{entity_name} Form",
+                "route": f"/{plural}/new",
+                "allowed_roles": role_names if "admin" in role_names else role_names,
+                "components": ["Form", "SubmitButton"]
+            })
         return pages
