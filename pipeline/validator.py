@@ -63,6 +63,7 @@ class Validator:
 
     def __init__(self):
         self.schemas = {}
+        self.repair_count = 0   # Track total repair attempts
         # Pluggable repair level registry
         self.repair_strategies: Dict[int, Callable] = {
             1: self._level1_repair,
@@ -70,21 +71,6 @@ class Validator:
             3: self._level3_repair,
         }
 
-    @classmethod
-    @lru_cache(maxsize=32)
-    def _get_cached_validator(cls, schema_key: str, schema: Dict) -> jsonschema.Draft7Validator:
-        """Cached validator using SHA256 hash key."""
-        # schema_key is already the hash; we store the validator directly.
-        # This method is called with the hash and the schema, but we only need the hash for the cache key.
-        # However, lru_cache works on arguments, so we pass the hash as first argument.
-        # We store the validator using the schema itself (the second argument is ignored for key? careful)
-        # Better: use a single argument: the hash string, and store in a separate dict.
-        # Simpler: keep the previous dictionary approach but add @lru_cache to the method that returns the hash.
-        # Let's revert to the dictionary approach but add @lru_cache on a helper that computes the hash.
-        pass
-
-    # Keep the existing dictionary cache because lru_cache on classmethod with dict argument is tricky.
-    # Instead, we keep the SHA256 key and dictionary as before.
     @classmethod
     def _get_validator(cls, schema: Dict) -> jsonschema.Draft7Validator:
         """Return cached validator for schema using SHA256 key."""
@@ -173,6 +159,9 @@ class Validator:
             validator = self._get_validator(schema)
             validator.validate(repaired)
             logger.info(f"[{schema_name}] Validation succeeded after repairs: {repairs_log}")
+            # Increment repair count if any repairs were applied
+            if repairs_log:
+                self.repair_count += 1
             return ValidationResult(valid=True, data=repaired, repaired=True,
                                     repairs_log=repairs_log)
         except jsonschema.ValidationError as e:
@@ -388,7 +377,6 @@ class Validator:
         # 7. UI routes without corresponding API endpoints? (basic)
         all_api_paths = {ep.get("path") for ep in api_endpoints}
         for route in ui_routing.keys():
-            # Simple check: if route is like "/users" and API has "/users" or "/users/{id}"
             if route != "/login" and route != "/dashboard":
                 if route not in all_api_paths and not any(route in p for p in all_api_paths):
                     warnings.append(f"UI route '{route}' has no matching API endpoint.")
