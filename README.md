@@ -158,7 +158,7 @@ Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflict
 
 All outputs are **valid, consistent, and executable** (simulation passes).
 ```
-
+```
 
 ## 🧩 Repository Structure
 
@@ -179,8 +179,8 @@ All outputs are **valid, consistent, and executable** (simulation passes).
 ├── requirements.txt
 └── README.md
 
-```
----
+
+
 
 ## 🛠️ Setup & Deployment
 
