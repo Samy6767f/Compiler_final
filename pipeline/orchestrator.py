@@ -1,5 +1,5 @@
 import time, logging
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, List
 from datetime import datetime
 
 from pipeline.intent_extractor import IntentExtractor
@@ -21,73 +21,129 @@ class Pipeline:
         self.simulator = RuntimeSimulator()
         self.metrics = MetricsTracker()
         self.results = {}
-        self.request_id = 0
-    
+        self.request_counter = 0
+
+    def _safe_stage(self, stage_name: str, func_llm, func_rule, input_data, errors: List[str],
+                    request_id: str) -> Any:
+        """
+        Execute a pipeline stage with LLM or rule‑based fallback.
+        Returns the result, and appends any error to `errors` list.
+        """
+        try:
+            logger.info(f"[{request_id}] Stage {stage_name}")
+            result = func_llm(input_data) if self.use_llm else func_rule(input_data)
+            self.metrics.record_stage(request_id, stage_name)
+            return result
+        except Exception as e:
+            logger.error(f"Stage {stage_name} failed: {e}")
+            errors.append(f"{stage_name}: {str(e)}")
+            return func_rule(input_data)
+
     def compile(self, prompt: str) -> Dict[str, Any]:
-        self.request_id += 1
-        request_id = f"req_{datetime.now().timestamp()}"
-        start = time.time()
-        errors = []
+        self.request_counter += 1
+        request_id = f"req_{self.request_counter}_{int(datetime.now().timestamp()*1000)}"
+        start_time = time.time()
+        errors: List[str] = []
+        warnings: List[str] = []
+
         self.metrics.start_timer(request_id)
-        
+
+        # Stage 1: Intent Extraction
+        intent = self._safe_stage(
+            "Intent Extraction",
+            self.intent_extractor.extract,
+            self.intent_extractor.extract_rule_based,
+            prompt, errors, request_id
+        )
+        self.results["intent"] = intent
+
+        # Stage 2: System Design
+        design = self._safe_stage(
+            "System Design",
+            self.system_designer.design,
+            self.system_designer.design_rule_based,
+            intent, errors, request_id
+        )
+        self.results["design"] = design
+
+        # Stage 3: Schema Generation
+        schemas = self._safe_stage(
+            "Schema Generation",
+            self.schema_generator.generate,
+            self.schema_generator.generate_rule_based,
+            design, errors, request_id
+        )
+        self.results["schemas"] = schemas
+
+        # Stage 4: Validation (may return (errors, warnings) or just errors)
+        logger.info(f"[{request_id}] Stage 4: Validation")
         try:
-            logger.info(f"[{request_id}] Stage 1: Extracting intent")
-            intent = self.intent_extractor.extract(prompt) if self.use_llm else self.intent_extractor.extract_rule_based(prompt)
-            self.results["intent"] = intent
-            self.metrics.record_stage(request_id, "intent_extraction")
+            val_result = self.validator.validate_cross_layer(design, schemas)
+            if isinstance(val_result, tuple) and len(val_result) == 2:
+                val_errors, val_warnings = val_result
+                warnings.extend(val_warnings)
+            elif isinstance(val_result, list):
+                val_errors = val_result
+            else:
+                val_errors = []
+            self.metrics.record_stage(request_id, "validation_repair")
         except Exception as e:
-            logger.error(f"Intent extraction failed: {e}")
-            errors.append(f"Intent: {str(e)}")
-            intent = self.intent_extractor.extract_rule_based(prompt)
-        
+            logger.error(f"Validation failed: {e}")
+            errors.append(f"Validation: {str(e)}")
+            val_errors = []
+            val_warnings = []
+
+        # Repair count tracking (if validator has repair_count attribute)
+        repair_count = getattr(self.validator, 'repair_count', 0)
+        self.metrics.record_repair_attempts(request_id, repair_count)
+
+        # Stage 5: Simulation (with its own error handling)
+        logger.info(f"[{request_id}] Stage 5: Simulation")
         try:
-            logger.info(f"[{request_id}] Stage 2: Designing system")
-            design = self.system_designer.design(intent) if self.use_llm else self.system_designer.design_rule_based(intent)
-            self.results["design"] = design
-            self.metrics.record_stage(request_id, "system_design")
+            simulation = self.simulator.simulate_execution(schemas)
+            self.metrics.record_stage(request_id, "simulation")
         except Exception as e:
-            logger.error(f"System design failed: {e}")
-            errors.append(f"Design: {str(e)}")
-            design = self.system_designer.design_rule_based(intent)
-        
-        try:
-            logger.info(f"[{request_id}] Stage 3: Generating schemas")
-            schemas = self.schema_generator.generate(design) if self.use_llm else self.schema_generator.generate_rule_based(design)
-            self.results["schemas"] = schemas
-            self.metrics.record_stage(request_id, "schema_generation")
-        except Exception as e:
-            logger.error(f"Schema generation failed: {e}")
-            errors.append(f"Schemas: {str(e)}")
-            schemas = self.schema_generator.generate_rule_based(design)
-        
-        logger.info(f"[{request_id}] Stage 4: Validating")
-        validation_errors = self.validator.validate_cross_layer(design, schemas)
-        self.metrics.record_stage(request_id, "validation_repair")
-        self.metrics.record_repair_attempts(request_id, self.validator.repair_count if hasattr(self.validator, 'repair_count') else 0)
-        
-        logger.info(f"[{request_id}] Stage 5: Simulating execution")
-        simulation = self.simulator.simulate_execution(schemas)
-        self.metrics.record_stage(request_id, "simulation")
-        
-        total_time = self.metrics.end_timer(request_id)
-        self.metrics.log_completion(request_id, simulation['can_execute'] and len(validation_errors) == 0)
-        
+            logger.error(f"Simulation failed: {e}")
+            errors.append(f"Simulation: {str(e)}")
+            simulation = {
+                "can_execute": False,
+                "checks_passed": [],
+                "checks_failed": [f"Simulation error: {str(e)}"],
+                "warnings": [],
+                "execution_plan": [],
+                "estimated_performance": {}
+            }
+
+        total_time_ms = self.metrics.end_timer(request_id)
+        success = simulation.get('can_execute', False) and len(val_errors) == 0
+        self.metrics.log_completion(request_id, success)
+
+        # Combine all warnings (from validation and simulation)
+        all_warnings = warnings + simulation.get('warnings', [])
+        # Also include any assumptions from intent
+        if intent.get("assumptions"):
+            all_warnings.extend([f"Assumption: {a}" for a in intent.get("assumptions", [])])
+
         return {
             "request_id": request_id,
             "intent": intent,
             "design": design,
             "schemas": schemas,
-            "validation": {"valid": len(validation_errors) == 0, "errors": validation_errors},
+            "validation": {
+                "valid": len(val_errors) == 0,
+                "errors": val_errors,
+                "warnings": all_warnings
+            },
             "simulation_result": simulation,
             "metrics": {
-                "total_time_ms": total_time,
+                "total_time_ms": total_time_ms,
                 "stages": self.metrics.stage_times.get(request_id, {}),
-                "repairs": self.metrics.repair_counts.get(request_id, 0)
+                "repairs": repair_count
             },
-            "latency_ms": round((time.time() - start) * 1000, 2),
-            "success": simulation['can_execute'] and len(validation_errors) == 0,
+            "latency_ms": round((time.time() - start_time) * 1000, 2),
+            "success": success,
             "stage_errors": errors
         }
-    
+
     def get_results(self) -> Dict[str, Any]:
         return self.results
