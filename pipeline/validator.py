@@ -374,11 +374,32 @@ class Validator:
                         last.lower() not in [t.lower() for t in db_tables]):
                     warnings.append(f"API endpoint '{path}' references resource not in DB tables.")
 
-        # 7. UI routes without corresponding API endpoints? (basic)
-        all_api_paths = {ep.get("path") for ep in api_endpoints}
-        for route in ui_routing.keys():
-            if route != "/login" and route != "/dashboard":
-                if route not in all_api_paths and not any(route in p for p in all_api_paths):
-                    warnings.append(f"UI route '{route}' has no matching API endpoint.")
+        # 7. UI routes should have corresponding API resources (semantic check, not exact path match)
+        # Build a set of API resources (e.g., "products") from endpoints
+        api_resources = set()
+        for ep in api_endpoints:
+            path = ep.get("path", "")
+            # Extract resource name from path (first segment after leading slash)
+            segments = [s for s in path.split("/") if s and not s.startswith("{")]
+            if segments:
+                api_resources.add(segments[0])
+        # Also add table names as fallback
+        api_resources.update([t.lower() for t in db_tables])
+
+        for route, route_config in ui_routing.items():
+            # Skip common non‑resource pages
+            if route in ["/login", "/dashboard"]:
+                continue
+            # Extract resource name from route (first segment after slash)
+            parts = route.strip('/').split('/')
+            resource = parts[0].lower()
+            if resource not in api_resources:
+                warnings.append(f"UI route '{route}' references resource '{resource}' with no matching API endpoint or DB table.")
+            # Also check if there is a creation page but no POST endpoint for that resource
+            if len(parts) > 1 and parts[1] == "new":
+                has_post = any(ep.get('method') == 'POST' and ep.get('path', '').strip('/').split('/')[0] == resource
+                               for ep in api_endpoints)
+                if not has_post:
+                    warnings.append(f"UI creation route '{route}' has no matching POST /{resource} API endpoint.")
 
         return errors, warnings
