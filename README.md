@@ -4,18 +4,18 @@
 > **From natural language to executable application configuration – a multi‑stage compiler with built‑in validation, repair, and simulation.**
 
 ---
-
+```
 ## 📌 Overview
 
 This project is a **production‑ready AI compiler** that transforms open‑ended user instructions into a **complete, validated, and executable** application blueprint. It outputs:
 
-- Database schema** (tables, fields, relationships, foreign keys)
-- REST API (endpoints, methods, role‑based permissions)
-- UI configuration (pages, routes, components, allowed roles)
+- **Database schema** (tables, fields, relationships, foreign keys)
+- **REST API (endpoints, methods, role‑based permissions)
+- ****UI configuration (pages, routes, components, allowed roles)
 - Authentication & authorisation (roles, permissions matrix)
 
 The system is designed as a **true compiler** – not a single‑prompt LLM hack. It follows a strict multi‑stage pipeline, includes an intelligent repair engine, simulates execution, and gracefully handles vague, conflicting, or incomplete inputs.
-
+```
 ---
 
 ## 🚀 Live Demo
@@ -134,11 +134,11 @@ If all checks pass, `can_execute: true` – the configuration is **executable wi
 **Result:** Average latency **20‑30 seconds** on free tiers, 100% success rate (every prompt produces valid JSON).
 
 ---
-
+```
 ## 📈 Evaluation Framework
 
 Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflicting, incomplete).
-```
+
 | Metric | Value |
 |--------|-------|
 | **Success rate** (valid JSON output) | 100% |
