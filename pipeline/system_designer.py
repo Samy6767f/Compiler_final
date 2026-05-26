@@ -86,6 +86,13 @@ Ensure:
 2. Relationship joins are accurately mapped between logical dependent keys.
 3. Every page contains explicit frontend route paths and associated authorization arrays.
 
+If the user intent is vague or incomplete, still produce a minimal but complete design:
+- Include at least one entity (e.g., "Item").
+- Include at least one role (e.g., "user").
+- Include at least one page (e.g., "Dashboard").
+- Include at least one flow (e.g., "User Authentication").
+- Never omit any of the required top‑level keys.
+
 Required Format Shape:
 {"entities":[{"name":"EntityName","fields":["id:uuid","name:string","created_at:timestamp"],"relations":[]}],"flows":[{"name":"FlowName","steps":["step1","step2"],"actors":["role"]}],"roles":[{"name":"rolename","permissions":["read","write"]}],"permissions":{"permName":["role"]},"pages":[{"name":"PageName","route":"/route","allowed_roles":["role"],"components":["Component"]}]}"""
 
@@ -169,6 +176,39 @@ Required Format Shape:
         if not isinstance(data.get("permissions"), dict):
             data["permissions"] = {}
 
+        # --- DEFAULT CONTENT GUARANTEES (for vague/incomplete inputs) ---
+        # Ensure at least one role
+        if not data["roles"]:
+            data["roles"] = [{"name": "user", "permissions": ["read"]}]
+            logger.warning("Added default 'user' role (none generated)")
+
+        # Ensure at least one page
+        if not data["pages"]:
+            data["pages"] = [
+                {"name": "Home", "route": "/", "allowed_roles": ["user"], "components": ["Header", "Content"]},
+                {"name": "Dashboard", "route": "/dashboard", "allowed_roles": ["user"], "components": ["StatsCard"]}
+            ]
+            logger.warning("Added default pages (none generated)")
+
+        # Generate permissions if missing but roles exist
+        if not data["permissions"] and data["roles"]:
+            data["permissions"] = self._generate_permissions(data["roles"])
+            logger.warning("Generated permissions from roles (was missing)")
+
+        # Ensure at least one flow
+        if not data["flows"]:
+            data["flows"] = [
+                {"name": "User Authentication", "steps": ["POST /auth/login", "Return JWT token"], "actors": ["guest"]}
+            ]
+            logger.warning("Added default authentication flow (none generated)")
+
+        # Ensure at least one entity
+        if not data["entities"]:
+            data["entities"] = [
+                {"name": "Item", "fields": ["id:uuid", "name:string", "created_at:timestamp", "updated_at:timestamp"], "relations": []}
+            ]
+            logger.warning("Added default entity 'Item' (none generated)")
+
         # --- Repair entities: ensure fields and relations are valid ---
         for entity in data.get("entities", []):
             if not isinstance(entity, dict):
@@ -184,7 +224,7 @@ Required Format Shape:
             if "updated_at" not in field_names:
                 entity["fields"].append("updated_at:timestamp")
 
-        # --- NEW: Repair incomplete flows (missing steps or actors) ---
+        # --- Repair incomplete flows (missing steps or actors) ---
         for flow in data.get("flows", []):
             if not isinstance(flow, dict):
                 continue
