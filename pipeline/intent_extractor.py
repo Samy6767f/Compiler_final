@@ -9,7 +9,7 @@ from pipeline.llm import generate_with_llama, review_with_model
 logger = logging.getLogger("ai-compiler")
 
 # ----------------------------------------------------------------------
-
+# Keyword maps (unchanged)
 # ----------------------------------------------------------------------
 ENTITY_KEYWORDS = {
     'contact': 'contacts', 'user': 'users', 'customer': 'customers',
@@ -101,13 +101,24 @@ ROLE_PERMISSIONS = {
     'default': ["create", "read", "update"],
 }
 
-
 VALID_APP_TYPES = {'crm', 'ecommerce', 'saas', 'dashboard', 'marketplace', 'social', 'healthcare', 'booking', 'ride', 'delivery'}
+
+# ---------- Helper function for safe title ----------
+def safe_title(value: Any) -> str:
+    """Convert value to title case safely, handling dicts and non‑strings."""
+    if isinstance(value, dict):
+        # Try to extract the first string value (e.g., {"name": "User"} -> "User")
+        for v in value.values():
+            if isinstance(v, str):
+                return v.title()
+        return "Unknown"
+    if isinstance(value, str):
+        return value.title()
+    return str(value).title()
 
 
 class IntentExtractor:
     def __init__(self):
-      
         self.role_patterns = {keyword: re.compile(rf'\b{re.escape(keyword)}\b', re.IGNORECASE)
                               for keyword in ROLE_KEYWORDS}
         self.entity_patterns = {keyword: re.compile(rf'\b{re.escape(keyword)}\b', re.IGNORECASE)
@@ -123,42 +134,90 @@ class IntentExtractor:
     def _cached_llm_extract(self, prompt: str, system_instruction: str) -> str:
         return generate_with_llama(prompt, system_instruction, max_tokens=1024)
 
+    def _normalize_ir(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize LLM output: convert dict‑like role names to strings, ensure entity names are strings."""
+        # Normalize roles: ensure each role's 'name' is a string
+        if "roles" in data and isinstance(data["roles"], list):
+            normalized_roles = []
+            for r in data["roles"]:
+                if isinstance(r, dict):
+                    name = r.get("name")
+                    if isinstance(name, dict):
+                        # Extract first string value from dict
+                        for v in name.values():
+                            if isinstance(v, str):
+                                name = v
+                                break
+                    if not isinstance(name, str):
+                        name = str(name) if name is not None else "user"
+                    normalized_roles.append({"name": name, "permissions": r.get("permissions", ["read"])})
+                elif isinstance(r, str):
+                    normalized_roles.append({"name": r, "permissions": ["read"]})
+            data["roles"] = normalized_roles
+
+        # Normalize entities: ensure each entity name is a string
+        if "entities" in data and isinstance(data["entities"], list):
+            data["entities"] = [safe_title(e) if isinstance(e, str) else str(e) for e in data["entities"]]
+
+        # Ensure features are strings
+        if "features" in data and isinstance(data["features"], list):
+            data["features"] = [str(f) for f in data["features"]]
+
+        # Ensure integrations are strings
+        if "integrations" in data and isinstance(data["integrations"], list):
+            data["integrations"] = [str(i) for i in data["integrations"]]
+
+        return data
+
     def extract(self, prompt: str) -> Dict[str, Any]:
-        try:
-            system_instruction = (
-                "You are the structural Intent Extractor frontend of an enterprise software compiler.\n"
-                "Analyze the user requirements and output an un-collapsed Intermediate Representation (IR).\n\n"
-                "CRITICAL COMPILER ENFORCEMENT RULES:\n"
-                "1. DO NOT simplify roles. If a user asks for 'GlobalAdmin' and 'ClinicManager', do not merge them into a generic 'user' or 'admin'.\n"
-                "2. Extract custom database fields, tracking keys, structural hierarchies (e.g. self-referencing relationship joins), and complex conditional validation rules entirely.\n"
-                "3. Explicitly list any discovered third-party integrations under 'integrations'.\n"
-                "4. Populate the 'ambiguities' or 'assumptions' tracking blocks if critical configuration details are missing.\n"
-                "5. If the user intent is vague or incomplete, still produce a minimal but complete IR:\n"
-                "   - Include at least one entity (e.g., 'Item').\n"
-                "   - Include at least one role (e.g., 'user' with 'read' permission).\n"
-                "   - Include a plausible app_type based on keywords.\n"
-                "   - Never omit any of the required top-level fields.\n\n"
-                "Output ONLY a raw, minified JSON object matching this exact schema structure without markdown wrappers or explanation block strings:\n"
-                "{\n"
-                "  \"app_name\": \"String\",\n"
-                "  \"app_type\": \"String\",\n"
-                "  \"features\": [\"List of unique application capabilities requiring functional layers\"],\n"
-                "  \"entities\": [\"List of all domain database tables/entities parsed\"],\n"
-                "  \"roles\": [{\"name\": \"role_name\", \"permissions\": [\"create\", \"read\", \"update\", \"delete\"]}],\n"
-                "  \"integrations\": [\"Third-party external APIs identified\"],\n"
-                "  \"ambiguities\": [],\n"
-                "  \"assumptions\": []\n"
-                "}"
-            )
-            raw_content = self._cached_llm_extract(prompt, system_instruction)
-            if "</thought>" in raw_content:
-                raw_content = raw_content.split("</thought>")[-1].strip()
-            intent_data = json.loads(raw_content)
-            return self._validate_and_heal_ir(intent_data, prompt)
-        except Exception as e:
-            logger.error(f"LLM Intent Extraction Compiler Fault: {e}, falling back to rule-based")
-            logger.info("Using rule-based intent extraction (fallback)")
-            return self.extract_rule_based(prompt)
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                system_instruction = (
+                    "You are the structural Intent Extractor frontend of an enterprise software compiler.\n"
+                    "Analyze the user requirements and output an un-collapsed Intermediate Representation (IR).\n\n"
+                    "CRITICAL COMPILER ENFORCEMENT RULES:\n"
+                    "1. DO NOT simplify roles. If a user asks for 'GlobalAdmin' and 'ClinicManager', do not merge them into a generic 'user' or 'admin'.\n"
+                    "2. Extract custom database fields, tracking keys, structural hierarchies (e.g. self-referencing relationship joins), and complex conditional validation rules entirely.\n"
+                    "3. Explicitly list any discovered third-party integrations under 'integrations'.\n"
+                    "4. Populate the 'ambiguities' or 'assumptions' tracking blocks if critical configuration details are missing.\n"
+                    "5. If the user intent is vague or incomplete, still produce a minimal but complete IR:\n"
+                    "   - Include at least one entity (e.g., 'Item').\n"
+                    "   - Include at least one role (e.g., 'user' with 'read' permission).\n"
+                    "   - Include a plausible app_type based on keywords.\n"
+                    "   - Never omit any of the required top-level fields.\n\n"
+                    "IMPORTANT: All role 'name' fields must be plain strings, not objects. Output ONLY raw minified JSON.\n"
+                    "Output a raw, minified JSON object matching this exact schema:\n"
+                    "{\n"
+                    "  \"app_name\": \"String\",\n"
+                    "  \"app_type\": \"String\",\n"
+                    "  \"features\": [\"...\"],\n"
+                    "  \"entities\": [\"...\"],\n"
+                    "  \"roles\": [{\"name\": \"role_name\", \"permissions\": [\"create\", \"read\", \"update\", \"delete\"]}],\n"
+                    "  \"integrations\": [\"...\"],\n"
+                    "  \"ambiguities\": [],\n"
+                    "  \"assumptions\": []\n"
+                    "}"
+                )
+                if attempt > 0:
+                    # Stricter prompt on retry
+                    system_instruction += "\n\nCRITICAL: Ensure role 'name' fields are strings, not objects. Do not nest objects inside 'name'."
+
+                raw_content = self._cached_llm_extract(prompt, system_instruction)
+                if "</thought>" in raw_content:
+                    raw_content = raw_content.split("</thought>")[-1].strip()
+                intent_data = json.loads(raw_content)
+                # Normalize before healing
+                intent_data = self._normalize_ir(intent_data)
+                return self._validate_and_heal_ir(intent_data, prompt)
+            except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
+                logger.warning(f"LLM extraction attempt {attempt+1} failed: {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"LLM Intent Extraction Compiler Fault after {max_retries} attempts, falling back to rule-based: {e}")
+                    logger.info("Using rule-based intent extraction (fallback)")
+                    return self.extract_rule_based(prompt)
+        # fallback (should not reach here)
+        return self.extract_rule_based(prompt)
 
     def _validate_and_heal_ir(self, ir: Dict[str, Any], original_prompt: str = "") -> Dict[str, Any]:
         required_keys = ["features", "entities", "roles", "integrations", "ambiguities", "assumptions"]
@@ -176,16 +235,19 @@ class IntentExtractor:
             ir["features"] = ["Basic CRUD Operations"]
             ir["assumptions"].append("Added basic CRUD feature (none extracted)")
 
+        # Ensure each role has at least read permission
         for role in ir["roles"]:
             if "read" not in role.get("permissions", []):
                 role.setdefault("permissions", []).append("read")
                 ir["assumptions"].append(f"Added 'read' permission to role '{role['name']}'")
 
+        # Add CRUD features for each entity using safe_title
         for entity in ir["entities"]:
-            crud = f"{entity.title()} CRUD"
+            entity_str = safe_title(entity)
+            crud = f"{entity_str} CRUD"
             if crud not in ir["features"]:
                 ir["features"].append(crud)
-                ir["assumptions"].append(f"Added CRUD feature for entity '{entity}'")
+                ir["assumptions"].append(f"Added CRUD feature for entity '{entity_str}'")
 
         if "app_name" not in ir or not ir["app_name"] or ir["app_name"] in ["MyApp", "App"]:
             ir["app_name"] = "GeneratedEnterpriseApp"
@@ -303,7 +365,8 @@ class IntentExtractor:
                 features.append(feature)
         for entity in entities:
             if entity not in ['items', 'auth', 'tokens', 'sessions', 'emails', 'sms', 'webhooks', 'maps', 'locations']:
-                crud = f"{entity.title()} CRUD"
+                entity_str = safe_title(entity)
+                crud = f"{entity_str} CRUD"
                 if crud not in features:
                     features.append(crud)
         if 'driver' in prompt_lower:
