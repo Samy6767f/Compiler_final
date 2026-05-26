@@ -1,11 +1,10 @@
 """
-LLM layer — NVIDIA NIM free tier only  
-Flow per pipeline stage:
-  1. compress_prompt()      — strip filler, ~35% token reduction
-  2. generate_with_llama()  — DeepSeek-R1 on NVIDIA NIM (best free reasoning)
-  3. minify_json()          — shrink draft ~60% before review
-  4. review_with_model()    — MiniMax M2.7 reviews minified JSON only
-  5. expand_json()          — pretty-print final output
+LLM layer — NVIDIA NIM free tier
+Optimised for low latency:
+  - Reduced max_tokens
+  - Faster review model
+  - Non‑streaming for short outputs
+  - Aggressive timeouts with retry backoff
 """
 
 import time, logging, os, json, re
@@ -18,14 +17,14 @@ NVIDIA_API_KEY  = os.environ.get("NVIDIA_API_KEY")
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 MODELS = {
-    # DeepSeek-R1: best free reasoning model on NVIDIA NIM for structured generation
+    # Fast generation model (DeepSeek-V4-Flash)
     "generation": "deepseek-ai/deepseek-v4-flash",
-    # MiniMax: fast reviewer — only receives minified JSON so it's quick
-    "review":     "minimaxai/minimax-m2.7",
+    # Fast review model – Llama 3.2 3B is much quicker than MiniMax M2.7
+    "review":     "meta/llama-3.2-3b-instruct",
 }
 
 MAX_RETRIES = 2
-RETRY_DELAY = 1
+RETRY_DELAY = 0.5  # seconds
 
 _nvidia_client = None
 
@@ -34,14 +33,12 @@ def _get_nvidia_client() -> OpenAI:
     global _nvidia_client
     if _nvidia_client is None:
         if not NVIDIA_API_KEY:
-            raise RuntimeError(
-                "NVIDIA_API_KEY not set. Add it to Railway → Variables."
-            )
+            raise RuntimeError("NVIDIA_API_KEY not set.")
         _nvidia_client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
     return _nvidia_client
 
 
-# ── PROMPT COMPRESSION ────────────────────────────────────────────────────────
+# ── PROMPT COMPRESSION (keep as is) ──────────────────────────────────────────
 
 _FILLER = re.compile(
     r'\b(please|kindly|basically|essentially|just|simply|really|very|quite|'
@@ -61,35 +58,24 @@ _EXPAND = {
     r'\bmvp\b':     'minimum viable product',
 }
 
-
 def compress_prompt(raw: str) -> str:
-    """Strip filler words and normalise abbreviations — ~35% token reduction."""
     text = raw.strip()
     text = _FILLER.sub('', text)
     for pat, rep in _EXPAND.items():
         text = re.sub(pat, rep, text, flags=re.IGNORECASE)
     text = re.sub(r'\s+', ' ', text).strip().rstrip('.!?')
-    compressed = (
-        f"[COMPILER_INPUT] APP_SPEC: {text} "
-        f"[CONSTRAINTS: strict_json_only, no_markdown, no_explanation, "
-        f"all_fields_required, snake_case_keys]"
-    )
-    logger.info(
-        f"Prompt compressed: {len(raw)}→{len(compressed)} chars "
-        f"({100 - int(len(compressed)/max(len(raw),1)*100)}% reduction)"
-    )
+    compressed = f"[COMPILER_INPUT] APP_SPEC: {text} [CONSTRAINTS: strict_json_only, no_markdown, no_explanation, all_fields_required, snake_case_keys]"
+    logger.info(f"Prompt compressed: {len(raw)}→{len(compressed)} chars")
     return compressed
 
 
-# ── JSON HELPERS ──────────────────────────────────────────────────────────────
+# ── JSON HELPERS (keep as is) ────────────────────────────────────────────────
 
 def minify_json(text: str) -> str:
-    """Remove whitespace — cuts payload ~60% before sending to MiniMax."""
     try:
         return json.dumps(json.loads(text), separators=(',', ':'))
     except Exception:
         return text
-
 
 def expand_json(text: str) -> str:
     try:
@@ -97,41 +83,30 @@ def expand_json(text: str) -> str:
     except Exception:
         return text
 
-
 def repair_json(text: str) -> str:
-    """Best-effort JSON extraction and repair."""
     text = text.strip()
-    # Strip markdown fences
     text = re.sub(r'```(?:json)?\s*', '', text).replace('```', '').strip()
-    # Strip DeepSeek-R1 think tags
     text = re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
-    # Find JSON object
     if not text.startswith('{'):
         m = re.search(r'\{[\s\S]*\}', text)
         if m:
             text = m.group()
-    # Quick parse
     try:
         json.loads(text)
         return text
     except json.JSONDecodeError:
-        pass
-    # Fix unbalanced braces
-    diff = text.count('{') - text.count('}')
-    if diff > 0:
-        text += '}' * diff
-    try:
-        json.loads(text)
-        return text
-    except Exception:
-        pass
-    # json_repair fallback
-    try:
-        from json_repair import repair_json as _jr
-        return _jr(text)
-    except Exception:
-        return text
-
+        diff = text.count('{') - text.count('}')
+        if diff > 0:
+            text += '}' * diff
+        try:
+            json.loads(text)
+            return text
+        except Exception:
+            try:
+                from json_repair import repair_json as _jr
+                return _jr(text)
+            except Exception:
+                return text
 
 def _json_structurally_different(a: str, b: str) -> bool:
     try:
@@ -140,49 +115,32 @@ def _json_structurally_different(a: str, b: str) -> bool:
         return a.strip() != b.strip()
 
 
-def _safe_get_content(completion) -> str:
-    if not completion.choices:
-        return ""
-    choice = completion.choices[0]
-    # Non-streaming response
-    if hasattr(choice, 'message'):
-        return choice.message.content or ""
-    return ""
+# ── NON‑STREAMING CALL (faster for short outputs) ────────────────────────────
 
-
-# ── STREAMING CALL ────────────────────────────────────────────────────────────
-
-def _stream_call(model: str, messages: list, temperature: float,
-                 max_tokens: int, timeout: int = 90) -> str:
+def _non_streaming_call(model: str, messages: list, temperature: float,
+                        max_tokens: int, timeout: int) -> str:
+    """Use non‑streaming for JSON responses – much lower latency."""
     t0 = time.time()
     client = _get_nvidia_client()
-    completion = client.chat.completions.create(
+    response = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=max(temperature, 0.01),
-        top_p=0.9,
+        temperature=temperature,
+        top_p=1.0,
         max_tokens=max_tokens,
-        stream=True,
+        stream=False,
         timeout=timeout,
     )
-    chunks = []
-    for chunk in completion:
-        if getattr(chunk, 'choices', None) and chunk.choices[0].delta.content:
-            chunks.append(chunk.choices[0].delta.content)
-    text = ''.join(chunks)
-    logger.info(f"[{model.split('/')[-1]}] {len(text)} chars in {time.time()-t0:.1f}s")
-    return text
+    content = response.choices[0].message.content or ""
+    logger.info(f"[{model.split('/')[-1]}] {len(content)} chars in {time.time()-t0:.1f}s")
+    return content
 
 
-# ── PUBLIC API ────────────────────────────────────────────────────────────────
+# ── PUBLIC API (with reduced token budgets) ──────────────────────────────────
 
 def generate_with_llama(prompt: str, system_message: str,
-                        max_tokens: int = 8192) -> str:
-    """
-    Generate using DeepSeek-R1 on NVIDIA NIM.
-    Prompt is compressed before sending.
-    Falls back gracefully.
-    """
+                        max_tokens: int = 2048) -> str:   # reduced from 8192
+    """Generate schema using DeepSeek-V4-Flash."""
     compressed = compress_prompt(prompt)
     messages = [
         {"role": "system", "content": system_message},
@@ -191,29 +149,33 @@ def generate_with_llama(prompt: str, system_message: str,
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            raw = _stream_call(MODELS["generation"], messages, 0.05, max_tokens)
+            raw = _non_streaming_call(
+                MODELS["generation"], messages,
+                temperature=0.0,          # deterministic
+                max_tokens=max_tokens,
+                timeout=60                # 60 seconds max
+            )
             if raw.strip():
                 return repair_json(raw)
         except Exception as e:
             last_err = e
-            logger.warning(f"DeepSeek attempt {attempt} failed: {e}")
+            logger.warning(f"Gen attempt {attempt} failed: {e}")
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_DELAY * attempt)
-    raise RuntimeError(f"DeepSeek-R1 failed after {MAX_RETRIES} attempts: {last_err}")
+    raise RuntimeError(f"Generation failed after {MAX_RETRIES} attempts: {last_err}")
 
 
 def review_with_model(draft: str, review_task: str,
-                      max_tokens: int = 4096) -> Tuple[str, bool]:
+                      max_tokens: int = 1024) -> Tuple[str, bool]:   # reduced
     """
-    MiniMax reviews MINIFIED JSON — faster, cheaper, same quality.
+    Fast review using Llama 3.2 3B (non‑streaming, low max_tokens).
     Returns (corrected_json_str, was_fixed).
     """
     mini = minify_json(draft)
 
     system = (
         "JSON_CORRECTOR. Fix ONLY structural errors and missing required fields. "
-        "Keep all correct parts unchanged. "
-        f"Output ONLY raw minified JSON, no markdown, no explanation. "
+        "Keep all correct parts unchanged. Output ONLY raw minified JSON, no markdown, no explanation. "
         f"TASK: {review_task}"
     )
     messages = [
@@ -222,20 +184,22 @@ def review_with_model(draft: str, review_task: str,
     ]
 
     try:
-        raw = _stream_call(MODELS["review"], messages, 0.02, max_tokens, timeout=60)
+        raw = _non_streaming_call(
+            MODELS["review"], messages,
+            temperature=0.0,
+            max_tokens=max_tokens,
+            timeout=30                     # 30 seconds max
+        )
         if not raw.strip():
             return draft, False
         corrected = repair_json(raw)
-        was_fixed  = _json_structurally_different(draft, corrected)
-        pretty     = expand_json(corrected)
-        logger.info(
-            f"MiniMax review: {len(mini)}B→{len(corrected)}B, was_fixed={was_fixed}"
-        )
+        was_fixed = _json_structurally_different(draft, corrected)
+        pretty = expand_json(corrected)
+        logger.info(f"Review: {len(mini)}B→{len(corrected)}B, fixed={was_fixed}")
         return pretty, was_fixed
     except Exception as e:
-        logger.warning(f"MiniMax review failed: {e}")
+        logger.warning(f"Review failed: {e}")
         return draft, False
 
 
-# Keep old alias for compatibility
-review_with_minimax = review_with_model
+review_with_minimax = review_with_model   # alias
