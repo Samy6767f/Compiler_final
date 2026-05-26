@@ -1,5 +1,8 @@
-import json, logging
+import json
+import logging
+import re
 from typing import Dict, List
+import jsonschema
 
 logger = logging.getLogger("ai-compiler")
 
@@ -15,7 +18,18 @@ SYSTEM_DESIGN_SCHEMA = {
                 "properties": {
                     "name": {"type": "string"},
                     "fields": {"type": "array", "items": {"type": "string"}},
-                    "relations": {"type": "array", "items": {"type": "string"}}
+                    "relations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["target", "type", "foreign_key"],
+                            "properties": {
+                                "target": {"type": "string"},
+                                "type": {"type": "string"},
+                                "foreign_key": {"type": "string"}
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -59,43 +73,91 @@ SYSTEM_DESIGN_SCHEMA = {
     }
 }
 
-SYSTEM_DESIGN_PROMPT = """Generate app architecture as JSON only. No explanation.
+SYSTEM_DESIGN_PROMPT = """You are Stage 2 of an AI Compiler — System Designer.
+Your task is to convert an application intent structure into a detailed architectural design framework.
 
-Format:
+Generate complete application architecture components as valid JSON matching the system schema guidelines.
+Output ONLY raw JSON. Do not include markdown code block backticks (```), thought processes, or narrative text.
+
+Ensure:
+1. Every entity contains basic system schema auditing fields: 'id:uuid', 'created_at:timestamp', 'updated_at:timestamp'.
+2. Relationship joins are accurately mapped between logical dependent keys.
+3. Every page contains explicit frontend route paths and associated authorization arrays.
+
+Required Format Shape:
 {"entities":[{"name":"EntityName","fields":["id:uuid","name:string","created_at:timestamp"],"relations":[]}],"flows":[{"name":"FlowName","steps":["step1","step2"],"actors":["role"]}],"roles":[{"name":"rolename","permissions":["read","write"]}],"permissions":{"permName":["role"]},"pages":[{"name":"PageName","route":"/route","allowed_roles":["role"],"components":["Component"]}]}"""
 
+
 class SystemDesigner:
+    def design(self, intent: Dict) -> Dict:
+        """Main compilation entry point for generating application architectural structures."""
+        return self.design_llm(intent)
+
     def design_llm(self, intent: Dict) -> Dict:
-        draft = self.design_rule_based(intent)
-        
+        """Uses LLM-driven synthesis to compile comprehensive system architectures."""
         try:
-            from pipeline.llm import review_with_model
-            draft_json = json.dumps(draft)
-            corrected, was_fixed = review_with_model(
-                draft_json,
-                "Ensure all entities have fields (id, name, created_at), roles have permissions, pages have routes and allowed_roles, permissions mapping is correct"
+            from pipeline.llm import _get_nvidia_client, MODELS
+            client = _get_nvidia_client()
+            
+            messages = [
+                {"role": "system", "content": SYSTEM_DESIGN_PROMPT},
+                {"role": "user", "content": f"Application Intent Map to Expand: {json.dumps(intent)}"}
+            ]
+            
+            response = client.chat.completions.create(
+                model=MODELS["generation"],
+                messages=messages,
+                temperature=0.0,
+                response_format={"type": "json_object"}
             )
-            if was_fixed:
-                draft = json.loads(corrected)
-                logger.info(f"Design: MiniMax fixed={was_fixed}")
+            
+            raw_content = response.choices[0].message.content
+            
+            # Clean potential reasoning markers or code block artifacts
+            if "</thought>" in raw_content:
+                raw_content = raw_content.split("</thought>")[-1].strip()
+                
+            draft = self._parse_and_validate(raw_content)
+            
+            # Downstream review flow
+            try:
+                from pipeline.llm import review_with_model
+                draft_json = json.dumps(draft)
+                corrected, was_fixed = review_with_model(
+                    draft_json,
+                    "Ensure all entities have fields (id, name, created_at), roles have permissions, pages have routes and allowed_roles, permissions mapping is correct"
+                )
+                if was_fixed:
+                    draft = self._parse_and_validate(corrected)
+                    logger.info(f"Design Phase: Architecture optimized via validation verification flow.")
+            except Exception as e:
+                logger.warning(f"Downstream design check skipped: {e}")
+                
+            return draft
+
         except Exception as e:
-            logger.warning(f"Design review failed: {e}")
-        
-        return draft
-    
+            logger.error(f"LLM design generation failed, calling code rule fallback mechanism: {e}")
+            return self.design_rule_based(intent)
+
     def _parse_and_validate(self, raw: str) -> Dict:
-        import jsonschema
-        import re
+        """Parses raw text responses, removes markdown, injects standard fields, and validates against schema."""
+        # Remove markdown code fences
         text = re.sub(r"```(?:json)?\s*", "", raw).strip().replace("```", "").strip()
+        
+        # Extract JSON object if surrounded by extra text
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
             match = re.search(r'\{[\s\S]*\}', text)
-            data = json.loads(match.group()) if match else {}
+            if not match:
+                raise ValueError("No valid JSON object found in response")
+            data = json.loads(match.group())
         
+        # --- AUTOMATIC FIELD INJECTION: id, created_at, updated_at ---
         for entity in data.get("entities", []):
             fields = entity.get("fields", [])
-            field_names = [f.split(":")[0] for f in fields]
+            # Extract field names (before colon)
+            field_names = [f.split(":")[0].strip() for f in fields]
             if "id" not in field_names:
                 entity["fields"].insert(0, "id:uuid")
             if "created_at" not in field_names:
@@ -103,17 +165,12 @@ class SystemDesigner:
             if "updated_at" not in field_names:
                 entity["fields"].append("updated_at:timestamp")
         
-        try:
-            jsonschema.validate(instance=data, schema=SYSTEM_DESIGN_SCHEMA)
-        except jsonschema.ValidationError:
-            pass
-        
+        # Strict schema validation
+        jsonschema.validate(instance=data, schema=SYSTEM_DESIGN_SCHEMA)
         return data
-    
-    def design(self, intent: Dict) -> Dict:
-        return self.design_llm(intent)
-    
+
     def design_rule_based(self, intent: Dict) -> Dict:
+        """Fallback rule‑based design generator when LLM is unavailable."""
         entities = self._design_entities(intent)
         roles = self._design_roles(intent)
         
@@ -126,27 +183,28 @@ class SystemDesigner:
         }
     
     def _design_entities(self, intent: Dict) -> List[Dict]:
+        """Rule‑based entity generation."""
         entities = []
         entity_names = intent.get("entities", [])
         
         base_fields = {
-            'users': ['id:uuid', 'email:string', 'password_hash:string', 'role:enum', 'created_at:timestamp'],
-            'contacts': ['id:uuid', 'name:string', 'email:string', 'phone:string', 'company:string', 'created_at:timestamp'],
-            'customers': ['id:uuid', 'name:string', 'email:string', 'phone:string', 'address:text', 'created_at:timestamp'],
-            'products': ['id:uuid', 'name:string', 'description:text', 'price:float', 'stock:integer', 'created_at:timestamp'],
-            'orders': ['id:uuid', 'customer_id:uuid', 'total:float', 'status:enum', 'created_at:timestamp'],
-            'payments': ['id:uuid', 'order_id:uuid', 'amount:float', 'method:string', 'status:enum', 'created_at:timestamp'],
-            'invoices': ['id:uuid', 'order_id:uuid', 'amount:float', 'status:enum', 'due_date:timestamp', 'created_at:timestamp'],
-            'clinics': ['id:uuid', 'name:string', 'address:string', 'created_at:timestamp'],
-            'doctors': ['id:uuid', 'name:string', 'specialty:string', 'clinic_id:uuid', 'created_at:timestamp'],
-            'patients': ['id:uuid', 'name:string', 'email:string', 'phone:string', 'clinic_id:uuid', 'created_at:timestamp'],
-            'medical_records': ['id:uuid', 'patient_id:uuid', 'doctor_id:uuid', 'diagnosis:text', 'created_at:timestamp'],
+            'users': ['id:uuid', 'email:string', 'password_hash:string', 'role:enum', 'created_at:timestamp', 'updated_at:timestamp'],
+            'contacts': ['id:uuid', 'name:string', 'email:string', 'phone:string', 'company:string', 'created_at:timestamp', 'updated_at:timestamp'],
+            'customers': ['id:uuid', 'name:string', 'email:string', 'phone:string', 'address:text', 'created_at:timestamp', 'updated_at:timestamp'],
+            'products': ['id:uuid', 'name:string', 'description:text', 'price:float', 'stock:integer', 'created_at:timestamp', 'updated_at:timestamp'],
+            'orders': ['id:uuid', 'customer_id:uuid', 'total:float', 'status:enum', 'created_at:timestamp', 'updated_at:timestamp'],
+            'payments': ['id:uuid', 'order_id:uuid', 'amount:float', 'method:string', 'status:enum', 'created_at:timestamp', 'updated_at:timestamp'],
+            'invoices': ['id:uuid', 'order_id:uuid', 'amount:float', 'status:enum', 'due_date:timestamp', 'created_at:timestamp', 'updated_at:timestamp'],
+            'clinics': ['id:uuid', 'name:string', 'address:string', 'created_at:timestamp', 'updated_at:timestamp'],
+            'doctors': ['id:uuid', 'name:string', 'specialty:string', 'clinic_id:uuid', 'created_at:timestamp', 'updated_at:timestamp'],
+            'patients': ['id:uuid', 'name:string', 'email:string', 'phone:string', 'clinic_id:uuid', 'created_at:timestamp', 'updated_at:timestamp'],
+            'medical_records': ['id:uuid', 'patient_id:uuid', 'doctor_id:uuid', 'diagnosis:text', 'created_at:timestamp', 'updated_at:timestamp'],
         }
 
         has_multi_tenant = any('clinic' in e.lower() or 'tenant' in e.lower() for e in entity_names)
         
         for name in entity_names:
-            fields = base_fields.get(name, ['id:uuid', 'name:string', 'created_at:timestamp'])
+            fields = base_fields.get(name, ['id:uuid', 'name:string', 'created_at:timestamp', 'updated_at:timestamp'])
             relations = []
             
             if has_multi_tenant and name.lower() not in ['clinics', 'tenants']:
@@ -165,11 +223,12 @@ class SystemDesigner:
             })
         
         if not entities:
-            entities.append({"name": "Item", "fields": ['id:uuid', 'name:string', 'created_at:timestamp'], "relations": []})
+            entities.append({"name": "Item", "fields": ['id:uuid', 'name:string', 'created_at:timestamp', 'updated_at:timestamp'], "relations": []})
         
         return entities
     
     def _design_roles(self, intent: Dict) -> List[Dict]:
+        """Rule‑based role generation."""
         roles_data = intent.get("roles", [])
         roles = []
         
@@ -189,6 +248,7 @@ class SystemDesigner:
         return roles
     
     def _generate_permissions(self, roles: List[Dict]) -> Dict:
+        """Generate permission map from roles."""
         permissions = {}
         for role in roles:
             role_name = role["name"]
@@ -201,6 +261,7 @@ class SystemDesigner:
         return permissions
     
     def _design_flows(self, entities: List[Dict], roles: List[Dict]) -> List[Dict]:
+        """Rule‑based flow generation."""
         flows = [
             {
                 "name": "User Authentication",
@@ -216,6 +277,7 @@ class SystemDesigner:
         return flows
     
     def _design_pages(self, entities: List[Dict], roles: List[Dict]) -> List[Dict]:
+        """Rule‑based page generation."""
         role_names = [r["name"] for r in roles]
         pages = [
             {"name": "Login", "route": "/login", "allowed_roles": ["guest"], "components": ["Form"]},
