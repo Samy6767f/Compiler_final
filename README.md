@@ -150,6 +150,7 @@ Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflict
 | **Cross‑layer consistency failures caught** | 12 / 20 prompts (all reported as warnings, not crashes) |
 
 ```
+```
 **Edge case examples:**
 
 - Vague: `"Build something cool"` → default `Item` entity, `user` role, `Dashboard` page.
@@ -157,7 +158,7 @@ Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflict
 - Incomplete: `"App with login"` → adds default entities (`Item`), roles (`user`), and pages (`Home`, `Dashboard`).
 
 All outputs are **valid, consistent, and executable** (simulation passes).
-```
+
 ```
 
 ## 🧩 Repository Structure
@@ -181,7 +182,7 @@ All outputs are **valid, consistent, and executable** (simulation passes).
 
 
 
-
+```
 ## 🛠️ Setup & Deployment
 
 1. **Clone the repository**
