@@ -231,10 +231,14 @@ Required Format Shape:
             ]
             logger.warning("Added default entity 'Item' (none generated)")
 
-        # --- Repair entities: ensure fields and relations are valid ---
-        for entity in data.get("entities", []):
+        # --- Repair entities: ensure name, fields and relations are valid ---
+        for idx, entity in enumerate(data.get("entities", [])):
             if not isinstance(entity, dict):
                 continue
+            # FIX: Ensure every entity has a 'name' field (required by schema)
+            if "name" not in entity:
+                entity["name"] = f"Entity_{idx}"
+                logger.warning(f"Added missing 'name' to entity at index {idx} (was {entity})")
             if "fields" not in entity or not isinstance(entity["fields"], list):
                 entity["fields"] = []
             fields = entity["fields"]
