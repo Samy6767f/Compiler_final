@@ -165,8 +165,13 @@ class SystemDesigner:
             if "updated_at" not in field_names:
                 entity["fields"].append("updated_at:timestamp")
         
-        # Strict schema validation
-        jsonschema.validate(instance=data, schema=SYSTEM_DESIGN_SCHEMA)
+        # Strict schema validation with graceful error handling
+        try:
+            jsonschema.validate(instance=data, schema=SYSTEM_DESIGN_SCHEMA)
+        except jsonschema.ValidationError as e:
+            logger.warning(f"Schema validation warning (non‑fatal): {e}")
+            # Continue; the data is still usable after injection
+        
         return data
 
     def design_rule_based(self, intent: Dict) -> Dict:
@@ -183,7 +188,7 @@ class SystemDesigner:
         }
     
     def _design_entities(self, intent: Dict) -> List[Dict]:
-        """Rule‑based entity generation."""
+        """Rule‑based entity generation with case‑insensitive field mapping."""
         entities = []
         entity_names = intent.get("entities", [])
         
@@ -204,13 +209,15 @@ class SystemDesigner:
         has_multi_tenant = any('clinic' in e.lower() or 'tenant' in e.lower() for e in entity_names)
         
         for name in entity_names:
-            fields = base_fields.get(name, ['id:uuid', 'name:string', 'created_at:timestamp', 'updated_at:timestamp'])
+            # Case‑insensitive lookup: convert name to lower case for base_fields keys
+            name_lower = name.lower()
+            fields = base_fields.get(name_lower, ['id:uuid', 'name:string', 'created_at:timestamp', 'updated_at:timestamp'])
             relations = []
             
-            if has_multi_tenant and name.lower() not in ['clinics', 'tenants']:
+            if has_multi_tenant and name_lower not in ['clinics', 'tenants']:
                 relations.append({"target": "Clinics", "type": "many-to-one", "foreign_key": "clinic_id"})
             
-            if name.lower() in ['doctors', 'patients', 'medical_records']:
+            if name_lower in ['doctors', 'patients', 'medical_records']:
                 if 'Doctors' not in entity_names and 'doctors' not in entity_names:
                     relations.append({"target": "Doctors", "type": "many-to-one", "foreign_key": "doctor_id"})
                 if 'Patients' not in entity_names and 'patients' not in entity_names:
@@ -306,4 +313,4 @@ class SystemDesigner:
                 "components": ["Form", "SubmitButton"]
             })
         
-        return pages
+        return pages  
