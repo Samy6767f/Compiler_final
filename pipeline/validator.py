@@ -388,7 +388,7 @@ class Validator:
 
         for route, route_config in ui_routing.items():
             # Skip common non‑resource pages
-            if route in ["/login", "/dashboard"]:
+            if route in ["/login", "/dashboard","/"]:
                 continue
             # Extract resource name from route (first segment after slash)
             parts = route.strip('/').split('/')
