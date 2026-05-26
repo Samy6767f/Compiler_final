@@ -19,7 +19,7 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 MODELS = {
     # DeepSeek-R1: best free reasoning model on NVIDIA NIM for structured generation
-    "generation": "deepseek-ai/deepseek-r1",
+    "generation": "deepseek-ai/deepseek-v4-flash",
     # MiniMax: fast reviewer — only receives minified JSON so it's quick
     "review":     "minimaxai/minimax-m2.7",
 }
