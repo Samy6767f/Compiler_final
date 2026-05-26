@@ -190,13 +190,20 @@ def generate_with_llama(prompt: str, system_message: str,
 
     raise RuntimeError("All generation providers failed (DeepSeek, Groq fast, Groq quality)")
 
-# ── REVIEW (NVIDIA only) ────────────────────────────────────────────────────
+# ── REVIEW (NVIDIA only, with input type safety) ───────────────────────────
 def review_with_model(draft: str, review_task: str,
                       max_tokens: int = 1024) -> Tuple[str, bool]:
     """
-    Review using NVIDIA Llama 3.2 3B (fast, reliable, no quota issues).
+    Review using NVIDIA Llama 3.2 3B (fast, reliable).
     Returns (corrected_json_str, was_fixed).
+    
+    Handles both string and dict input (converts dict to JSON string).
     """
+    # 🔧 FIX: If draft is a dict, convert to JSON string first
+    if isinstance(draft, dict):
+        draft = json.dumps(draft)
+        logger.debug("Converted dict draft to JSON string for review.")
+    
     mini = minify_json(draft)
     system = (
         "JSON_CORRECTOR. Fix ONLY structural errors and missing required fields. "
