@@ -265,6 +265,16 @@ Required Format Shape:
                 entity["relations"] = []
             entity["relations"] = [self._normalize_relation(r) for r in entity["relations"]]
 
+        # --- ROUTE NORMALIZATION: Convert UI routes to match API endpoint syntax ---
+        for page in data.get("pages", []):
+            route = page.get("route", "")
+            # Replace :id with {id}
+            route = re.sub(r':id\b', '{id}', route)
+            # Replace /create with /new (if not already)
+            if route.endswith('/create'):
+                route = route.replace('/create', '/new')
+            page["route"] = route
+
         # --- Validate against schema (non‑fatal) ---
         try:
             jsonschema.validate(instance=data, schema=self.SYSTEM_DESIGN_SCHEMA)
@@ -427,7 +437,6 @@ Required Format Shape:
         ]
         for entity in entities:
             entity_name = entity["name"]
-            # Ensure entity_name is a string
             if not isinstance(entity_name, str):
                 entity_name = str(entity_name)
             lower = safe_lower(entity_name)
