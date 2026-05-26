@@ -23,12 +23,10 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY")
 
 MODELS = {
-    # Primary generation (Groq - fast)
-    "generation_primary": "llama-3.1-8b-instant",
-    # Fallback models
+    "generation": "llama-3.1-8b-instant",           
+    "generation_primary": "llama-3.1-8b-instant",   
     "generation_fallback": "deepseek-ai/deepseek-v4-flash",
     "generation_groq_quality": "llama-3.3-70b-versatile",
-    # Review model (NVIDIA Llama 3.2 3B)
     "review": "meta/llama-3.2-3b-instruct",
 }
 
