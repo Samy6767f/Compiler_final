@@ -3,7 +3,7 @@ from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
-from typing import Dict, Any, AsyncGenerator, Optional
+from typing import Dict, Any, AsyncGenerator, Optional, Union, Tuple, List
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ai-compiler")
@@ -123,20 +123,33 @@ async def get_result(request_id: str):
     return JSONResponse(tracker._result or {"error": "No result", "success": False})
 
 
+def _flatten_validation_errors(raw_errors: Any) -> List[str]:
+    """
+    Recursively flatten any structure (tuple, list, dict, string) into a list of strings.
+    Handles both (errors, warnings) tuple and malformed returns.
+    """
+    flat = []
+    if raw_errors is None:
+        return flat
+    if isinstance(raw_errors, str):
+        return [raw_errors]
+    if isinstance(raw_errors, (tuple, list)):
+        for item in raw_errors:
+            flat.extend(_flatten_validation_errors(item))
+        return flat
+    if isinstance(raw_errors, dict):
+        # If dict, take values (might be errors dict)
+        for val in raw_errors.values():
+            flat.extend(_flatten_validation_errors(val))
+        return flat
+    # Fallback: convert to string
+    return [str(raw_errors)]
+
+
 async def run_pipeline(prompt: str, request_id: str, tracker: ProgressTracker):
     """
     Runs the full 5-stage pipeline.
-    Result shape (what www/index.html reads):
-      {
-        success, request_id,
-        intent, design,
-        schemas: { db, api, ui, auth },
-        validation: { valid, errors },
-        simulation_result,
-        issues_found, refinement_notes, assumptions,
-        metrics: { latency_ms, stage_timings_ms, repairs }
-        latency_ms
-      }
+    Result shape matches www/index.html expectations.
     """
     stage_timings: Dict[str, float] = {}
     t0 = time.time()
@@ -183,12 +196,26 @@ async def run_pipeline(prompt: str, request_id: str, tracker: ProgressTracker):
         # ── Stage 4: Validation ───────────────────────────────────────────────
         await tracker.emit("4_validation_refinement", "started", "Validating cross-layer consistency...")
         ts = time.time()
-        val_errors = await asyncio.get_event_loop().run_in_executor(
+        raw_errors = await asyncio.get_event_loop().run_in_executor(
             None, lambda: pipeline_llm.validator.validate_cross_layer(design, schemas)
         )
         stage_timings["4_validation_refinement"] = ms(ts)
-        issues  = [e for e in val_errors if any(k in e.lower() for k in ("undefined","missing","no ","invalid"))]
-        notes   = [e for e in val_errors if e not in issues]
+
+        # Flatten any nested structure into a list of strings
+        flat_errors = _flatten_validation_errors(raw_errors)
+
+        # Separate issues (critical) from notes (warnings/info)
+        keywords = ("undefined", "missing", "no ", "invalid", "failed", "mismatch")
+        issues = []
+        notes = []
+        for err in flat_errors:
+            if not isinstance(err, str):
+                err = str(err)
+            if any(k in err.lower() for k in keywords):
+                issues.append(err)
+            else:
+                notes.append(err)
+
         await tracker.emit("4_validation_refinement", "completed",
                            "Passed" if not issues else f"{len(issues)} issues found")
 
@@ -200,7 +227,11 @@ async def run_pipeline(prompt: str, request_id: str, tracker: ProgressTracker):
         )
         # Merge validation issues into simulation fails so UI shows them
         simulation.setdefault("checks_failed", [])
-        simulation["checks_failed"].extend(issues)
+        if isinstance(simulation["checks_failed"], list):
+            simulation["checks_failed"].extend(issues)
+        else:
+            simulation["checks_failed"] = issues
+
         stage_timings["5_output"] = ms(ts)
 
         latency = round((time.time() - t0) * 1000, 1)
@@ -209,17 +240,15 @@ async def run_pipeline(prompt: str, request_id: str, tracker: ProgressTracker):
         result = {
             "success":           simulation.get("can_execute", True) and not issues,
             "request_id":        request_id,
-            # flat keys that tabs read
             "intent":            intent,
             "design":            design,
-            # nested under 'schemas' — this is what index.html reads: data.schemas.db etc.
             "schemas": {
                 "db":   schemas.get("db",   {}),
                 "api":  schemas.get("api",  {}),
                 "ui":   schemas.get("ui",   {}),
                 "auth": schemas.get("auth", {}),
             },
-            "validation":        {"valid": not issues, "errors": val_errors},
+            "validation":        {"valid": not issues, "errors": flat_errors},
             "simulation_result": simulation,
             "issues_found":      issues,
             "refinement_notes":  notes,
@@ -232,7 +261,6 @@ async def run_pipeline(prompt: str, request_id: str, tracker: ProgressTracker):
             },
         }
 
-        # Set result BEFORE marking complete (fixes race condition)
         tracker._result = result
         logger.info(f"[{request_id}] Done: success={result['success']} latency={latency}ms")
         await tracker.emit("5_output", "completed", "Ready!")
