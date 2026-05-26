@@ -31,7 +31,7 @@ Enter any app description (e.g., *“Build a task manager with projects, tasks, 
 
 The compiler follows a **five‑stage pipeline**, mirroring traditional compiler design:
 
-```
+
 User Input (Natural Language)
          │
          ▼
