@@ -2,6 +2,8 @@ import json
 import re
 import difflib  
 import logging
+import asyncio
+import concurrent.futures
 from typing import Dict, List, Any, Optional
 from functools import lru_cache
 from pipeline.llm import generate_with_llama, review_with_model
@@ -182,55 +184,113 @@ class IntentExtractor:
 
         return data
 
-    def extract(self, prompt: str) -> Dict[str, Any]:
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                system_instruction = (
-                    "You are the structural Intent Extractor frontend of an enterprise software compiler.\n"
-                    "Analyze the user requirements and output an un-collapsed Intermediate Representation (IR).\n\n"
-                    "CRITICAL COMPILER ENFORCEMENT RULES:\n"
-                    "1. DO NOT simplify roles. If a user asks for 'GlobalAdmin' and 'ClinicManager', do not merge them into a generic 'user' or 'admin'.\n"
-                    "2. Extract custom database fields, tracking keys, structural hierarchies (e.g. self-referencing relationship joins), and complex conditional validation rules entirely.\n"
-                    "3. Explicitly list any discovered third-party integrations under 'integrations'.\n"
-                    "4. Populate the 'ambiguities' or 'assumptions' tracking blocks if critical configuration details are missing.\n"
-                    "5. If the user intent is vague or incomplete, still produce a minimal but complete IR:\n"
-                    "   - Include at least one entity (e.g., 'Item').\n"
-                    "   - Include at least one role (e.g., 'user' with 'read' permission).\n"
-                    "   - Include a plausible app_type based on keywords.\n"
-                    "   - Never omit any of the required top-level fields.\n\n"
-                    "IMPORTANT: All role 'name' fields must be plain strings, not objects. Output ONLY raw minified JSON.\n"
-                    "Output a raw, minified JSON object matching this exact schema:\n"
-                    "{\n"
-                    "  \"app_name\": \"String\",\n"
-                    "  \"app_type\": \"String\",\n"
-                    "  \"features\": [\"...\"],\n"
-                    "  \"entities\": [\"...\"],\n"
-                    "  \"roles\": [{\"name\": \"role_name\", \"permissions\": [\"create\", \"read\", \"update\", \"delete\"]}],\n"
-                    "  \"integrations\": [\"...\"],\n"
-                    "  \"ambiguities\": [],\n"
-                    "  \"assumptions\": []\n"
-                    "}"
-                )
-                if attempt > 0:
-                    # Stricter prompt on retry
-                    system_instruction += "\n\nCRITICAL: Ensure role 'name' fields are strings, not objects. Do not nest objects inside 'name'."
+    def _run_single_extraction(self, prompt: str, system_instruction: str) -> Dict[str, Any]:
+        """Run one intent extraction, parse and normalize."""
+        raw_content = self._cached_llm_extract(prompt, system_instruction)
+        if "</thought>" in raw_content:
+            raw_content = raw_content.split("</thought>")[-1].strip()
+        data = json.loads(raw_content)
+        return self._normalize_ir(data)
 
-                raw_content = self._cached_llm_extract(prompt, system_instruction)
-                if "</thought>" in raw_content:
-                    raw_content = raw_content.split("</thought>")[-1].strip()
-                intent_data = json.loads(raw_content)
-                # Normalize before healing
-                intent_data = self._normalize_ir(intent_data)
-                return self._validate_and_heal_ir(intent_data, prompt)
-            except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
-                logger.warning(f"LLM extraction attempt {attempt+1} failed: {e}")
-                if attempt == max_retries - 1:
-                    logger.error(f"LLM Intent Extraction Compiler Fault after {max_retries} attempts, falling back to rule-based: {e}")
-                    logger.info("Using rule-based intent extraction (fallback)")
-                    return self.extract_rule_based(prompt)
-        # fallback (should not reach here)
-        return self.extract_rule_based(prompt)
+    def _merge_ir_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge multiple IRs by voting (keep entities/roles that appear in at least 2)."""
+        from collections import Counter
+        entity_counts = Counter()
+        role_counts = Counter()
+        role_perms = {}   # role_name -> set of permissions
+        feature_set = set()
+        integration_set = set()
+        app_names = []
+        app_types = []
+
+        for ir in results:
+            entity_counts.update(ir.get("entities", []))
+            for role in ir.get("roles", []):
+                name = role.get("name")
+                if name:
+                    role_counts[name] += 1
+                    if name not in role_perms:
+                        role_perms[name] = set()
+                    role_perms[name].update(role.get("permissions", []))
+            feature_set.update(ir.get("features", []))
+            integration_set.update(ir.get("integrations", []))
+            if ir.get("app_name"):
+                app_names.append(ir["app_name"])
+            if ir.get("app_type"):
+                app_types.append(ir["app_type"])
+
+        # Keep entities with count >= 2
+        merged_entities = [e for e, cnt in entity_counts.items() if cnt >= 2]
+        # Keep roles with count >= 2
+        merged_roles = [
+            {"name": name, "permissions": list(perms)}
+            for name, perms in role_perms.items() if role_counts[name] >= 2
+        ]
+        # If no entity/role survives, fallback to first result (or defaults later)
+        if not merged_entities and results:
+            merged_entities = results[0].get("entities", ["Item"])
+        if not merged_roles and results:
+            merged_roles = results[0].get("roles", [{"name": "user", "permissions": ["read"]}])
+
+        merged_ir = {
+            "app_name": max(set(app_names), key=app_names.count) if app_names else "GeneratedApp",
+            "app_type": max(set(app_types), key=app_types.count) if app_types else "saas",
+            "features": list(feature_set),
+            "entities": merged_entities,
+            "roles": merged_roles,
+            "integrations": list(integration_set),
+            "ambiguities": [],
+            "assumptions": []
+        }
+        return merged_ir
+
+    def extract(self, prompt: str) -> Dict[str, Any]:
+        """Extract intent with ensemble (3 parallel runs, voting on entities/roles)."""
+        system_instruction = (
+            "You are the structural Intent Extractor frontend of an enterprise software compiler.\n"
+            "Analyze the user requirements and output an un-collapsed Intermediate Representation (IR).\n\n"
+            "CRITICAL COMPILER ENFORCEMENT RULES:\n"
+            "1. DO NOT simplify roles. If a user asks for 'GlobalAdmin' and 'ClinicManager', do not merge them into a generic 'user' or 'admin'.\n"
+            "2. Extract custom database fields, tracking keys, structural hierarchies (e.g. self-referencing relationship joins), and complex conditional validation rules entirely.\n"
+            "3. Explicitly list any discovered third-party integrations under 'integrations'.\n"
+            "4. Populate the 'ambiguities' or 'assumptions' tracking blocks if critical configuration details are missing.\n"
+            "5. If the user intent is vague or incomplete, still produce a minimal but complete IR:\n"
+            "   - Include at least one entity (e.g., 'Item').\n"
+            "   - Include at least one role (e.g., 'user' with 'read' permission).\n"
+            "   - Include a plausible app_type based on keywords.\n"
+            "   - Never omit any of the required top-level fields.\n\n"
+            "IMPORTANT: All role 'name' fields must be plain strings, not objects. Output ONLY raw minified JSON.\n"
+            "Output a raw, minified JSON object matching this exact schema:\n"
+            "{\n"
+            "  \"app_name\": \"String\",\n"
+            "  \"app_type\": \"String\",\n"
+            "  \"features\": [\"...\"],\n"
+            "  \"entities\": [\"...\"],\n"
+            "  \"roles\": [{\"name\": \"role_name\", \"permissions\": [\"create\", \"read\", \"update\", \"delete\"]}],\n"
+            "  \"integrations\": [\"...\"],\n"
+            "  \"ambiguities\": [],\n"
+            "  \"assumptions\": []\n"
+            "}"
+        )
+
+        # Run 3 extractions in parallel using ThreadPoolExecutor (asyncio not needed)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(self._run_single_extraction, prompt, system_instruction) for _ in range(3)]
+            results = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    logger.warning(f"Ensemble extraction failed: {e}")
+                    # If one fails, continue; if all fail, fallback to rule-based later
+        # If at least one succeeded, merge; otherwise fallback to rule-based
+        if results:
+            merged = self._merge_ir_results(results)
+            # Healing ensures defaults for missing fields
+            return self._validate_and_heal_ir(merged, prompt)
+        else:
+            logger.error("All ensemble extractions failed, falling back to rule‑based")
+            return self.extract_rule_based(prompt)
 
     def _validate_and_heal_ir(self, ir: Dict[str, Any], original_prompt: str = "") -> Dict[str, Any]:
         required_keys = ["features", "entities", "roles", "integrations", "ambiguities", "assumptions"]
