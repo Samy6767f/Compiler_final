@@ -31,6 +31,7 @@ Enter any app description (e.g., *“Build a task manager with projects, tasks, 
 
 The compiler follows a **five‑stage pipeline**, mirroring traditional compiler design:
 
+```
 User Input (Natural Language)
          │
          ▼
@@ -41,27 +42,27 @@ User Input (Natural Language)
 │     - Parse entities, roles, features from text             │
 │     - Handle vague/underspecified inputs                    │
 │     - Make assumptions and document them                    │
-│     └─────────────────┬───────────────────────────────────┘
+│     └─────────────────┬───────────────────────────────────┘ |
 │                       ▼                                     │
 │  2. SYSTEM DESIGN                                           │
 │     - Determine app type (CRM, CMS, Ecommerce, etc)         │
 │     - Design entity relationships                           │
 │     - Plan security architecture                            │
 │     - Detect third-party integrations                       │
-│     └─────────────────┬───────────────────────────────────┘
+│     └─────────────────┬───────────────────────────────────┘ |
 │                       ▼                                     │
 │  3. SCHEMA GENERATION                                       │
 │     - Generate UI schema (pages, components)                │
 │     - Generate API schema (endpoints, methods)              │
 │     - Generate DB schema (tables, columns, relations)       │
 │     - Generate Auth rules (roles, permissions)              │
-│     └─────────────────┬───────────────────────────────────┘
+│     └─────────────────┬───────────────────────────────────┘ |
 │                       ▼                                     │
 │  4. VALIDATION + REPAIR ENGINE                              │
 │     - Cross-layer consistency checks                        │
 │     - Schema validation against contracts                   │
 │     - Automatic repair of missing/invalid parts             │
-│     └─────────────────┬───────────────────────────────────┘
+│     └─────────────────┬───────────────────────────────────┘ |
 │                       ▼                                     │
 │  5. EXECUTION RUNTIME                                       │
 │     - Execute generated schemas                             │
