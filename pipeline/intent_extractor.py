@@ -2,7 +2,7 @@ import json
 import re
 import logging
 from typing import Dict, List, Any
-from pipeline.llm import _get_nvidia_client, MODELS
+from pipeline.llm import generate_with_llama, review_with_model
 
 logger = logging.getLogger("ai-compiler")
 
@@ -71,8 +71,6 @@ class IntentExtractor:
         into a semantic, high-fidelity Intermediate Representation (IR).
         """
         try:
-            client = _get_nvidia_client()
-            
             system_instruction = (
                 "You are the structural Intent Extractor frontend of an enterprise software compiler.\n"
                 "Analyze the user requirements and output an un-collapsed Intermediate Representation (IR).\n\n"
@@ -98,23 +96,13 @@ class IntentExtractor:
                 "  \"assumptions\": []\n"
                 "}"
             )
-            
-            response = client.chat.completions.create(
-                model=MODELS["generation"],
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": f"User Prompt Requirements: {prompt}"}
-                ],
-                temperature=0.0,  # Ensure absolute compiler determinism
-                response_format={"type": "json_object"}
-            )
-            
-            raw_content = response.choices[0].message.content
-            
-            # Programmatically clean deepseek reasoning thought tags if leaked through JSON mode
+
+            # Use the unified generation function (handles Groq/DeepSeek/fallback)
+            raw_content = generate_with_llama(prompt, system_instruction, max_tokens=1024)
+
             if "</thought>" in raw_content:
                 raw_content = raw_content.split("</thought>")[-1].strip()
-                
+
             intent_data = json.loads(raw_content)
             return self._validate_and_heal_ir(intent_data)
 
@@ -128,7 +116,7 @@ class IntentExtractor:
         for key in required_keys:
             if key not in ir or not isinstance(ir[key], list):
                 ir[key] = []
-        
+
         # Add default content if empty (ensures minimal completeness)
         if not ir["entities"]:
             ir["entities"] = ["Item"]
@@ -139,20 +127,19 @@ class IntentExtractor:
         if not ir["features"]:
             ir["features"] = ["Basic CRUD Operations"]
             ir["assumptions"].append("Added basic CRUD feature because none were extracted")
-        
+
         if "app_name" not in ir or not ir["app_name"] or ir["app_name"] in ["MyApp", "App"]:
             ir["app_name"] = "GeneratedEnterpriseApp"
-            
+
         if "app_type" not in ir or not ir["app_type"]:
             ir["app_type"] = "saas"
-            
+
         return ir
 
     def extract_with_review(self, prompt: str) -> Dict[str, Any]:
         """Fallback wrapper loop supporting downstream minimax review validations."""
         draft = self.extract(prompt)
         try:
-            from pipeline.llm import review_with_model
             draft_json = json.dumps(draft)
             corrected, was_fixed = review_with_model(
                 draft_json,
@@ -163,9 +150,9 @@ class IntentExtractor:
                 logger.info(f"Intent Refinement Complete: MiniMax fixed={was_fixed}")
         except Exception as e:
             logger.warning(f"Intent verification check failed: {e}")
-        
+
         return draft
-    
+
     def extract_rule_based(self, prompt: str) -> Dict:
         """Deterministic keyword parser preserved strictly for compiler fallback safety."""
         prompt_lower = prompt.lower()
@@ -174,7 +161,7 @@ class IntentExtractor:
         features = self._extract_features(prompt, entities, roles)
         integrations = self._detect_integrations(prompt_lower)
         app_type = self._detect_app_type(prompt_lower)
-        
+
         deduped_features = list(set(features))
         intent = {
             "app_name": self._generate_app_name(prompt),
@@ -186,65 +173,65 @@ class IntentExtractor:
             "ambiguities": [],
             "assumptions": []
         }
-        
+
         role_names = [r["name"] for r in roles]
         if len(roles) == 1:
             if "admin" not in role_names:
                 intent["assumptions"].append("Added admin role for system management")
                 intent["roles"].append({"name": "admin", "permissions": ["create", "read", "update", "delete", "admin"]})
-        
+
         if "magic link" in prompt_lower or "passwordless" in prompt_lower:
             intent["features"] = [f for f in intent["features"] if "magic" not in f.lower() or f == "Magic Link Auth"]
             if "Magic Link Auth" not in intent["features"]:
                 intent["features"].append("Magic Link Auth")
-        
+
         if "2fa" in prompt_lower or "corporate" in prompt_lower or "mfa" in prompt_lower:
             if "2FA Authentication" not in intent["features"] and "2FA Token" not in intent["features"]:
                 intent["features"].append("2FA Authentication")
-        
+
         if "map" in prompt_lower:
             if "Map View" not in intent["features"]:
                 intent["features"].append("Map View")
-        
+
         if "dark mode" in prompt_lower or "darkmode" in prompt_lower:
             if "Dark Mode" not in intent["features"]:
                 intent["features"].append("Dark Mode")
-        
+
         return intent
-    
+
     def _extract_entities(self, text: str) -> List[str]:
         found = set()
         entities = []
-        
+
         for keyword, entity_name in ENTITY_KEYWORDS.items():
             if keyword in text and entity_name not in found:
                 entities.append(entity_name)
                 found.add(entity_name)
-        
+
         if not entities:
             entities.append("items")
-        
+
         return entities
-    
+
     def _extract_roles(self, text: str) -> List[Dict]:
         roles = []
         seen = set()
-        
+
         for keyword, role in ROLE_KEYWORDS.items():
             pattern = r'\b' + re.escape(keyword) + r'\b'
             if re.search(pattern, text) and role not in seen:
                 perms = self._get_role_permissions(role)
                 roles.append({"name": role, "permissions": perms})
                 seen.add(role)
-        
+
         if 'admin' in text and 'user' not in seen and 'customer' not in seen:
             roles.append({"name": "user", "permissions": ["create", "read", "update"]})
-        
+
         if not roles:
             roles.append({"name": "user", "permissions": ["create", "read", "update"]})
-        
+
         return roles
-    
+
     def _get_role_permissions(self, role: str) -> List[str]:
         if role in ('admin', 'global_admin', 'super_admin'):
             return ["create", "read", "update", "delete", "admin"]
@@ -264,23 +251,23 @@ class IntentExtractor:
             return ["create", "read", "update"]
         else:
             return ["create", "read", "update"]
-    
+
     def _extract_features(self, prompt: str, entities: List, roles: List) -> List[str]:
         features = []
         prompt_lower = prompt.lower()
-        
+
         for keyword, feature in FEATURE_KEYWORDS.items():
             if keyword.lower() in prompt_lower and feature not in features:
                 features.append(feature)
-        
+
         for entity in entities:
             if entity not in ['items', 'auth', 'tokens', 'sessions', 'emails', 'sms', 'webhooks', 'maps', 'locations']:
                 features.append(f"{entity.title()} CRUD")
-        
+
         auth_features = set()
         has_passwordless = 'magic link' in prompt_lower or 'passwordless' in prompt_lower
         has_2fa = '2fa' in prompt_lower or 'mfa' in prompt_lower or 'corporate' in prompt_lower or 'token' in prompt_lower
-        
+
         if has_passwordless and has_2fa:
             auth_features.add("Passwordless Magic Link Auth")
             auth_features.add("2FA Authentication")
@@ -288,26 +275,26 @@ class IntentExtractor:
             auth_features.add("Passwordless Magic Link Auth")
         elif has_2fa:
             auth_features.add("2FA Authentication")
-        
+
         if 'driver' in prompt_lower:
             auth_features.add("Driver Status (Online/Offline)")
             if any(k in prompt_lower for k in ['30 second', '30sec', '30s']):
                 auth_features.add("30s Driver Acceptance Timer")
             if 'insulated' in prompt_lower or 'bag' in prompt_lower:
                 auth_features.add("Insulated Bag Indicator")
-        
+
         if 'reject' in prompt_lower or 'accept' in prompt_lower:
             auth_features.add("Driver Accept/Reject Flow")
-        
+
         if 'closest' in prompt_lower:
             auth_features.add("Closest Driver Matching")
-        
+
         if 'dark mode' in prompt_lower or 'darkmode' in prompt_lower:
             auth_features.add("Dark Mode Toggle")
-        
+
         features.extend(auth_features)
         return list(set(features))
-    
+
     def _detect_integrations(self, text: str) -> List[str]:
         integration_map = {
             'stripe': 'Stripe', 'payment': 'Stripe',
@@ -324,7 +311,7 @@ class IntentExtractor:
             'razorpay': 'Razorpay',
         }
         return [name for key, name in integration_map.items() if key in text]
-    
+
     def _detect_app_type(self, text: str) -> str:
         type_signatures = {
             'crm': ['crm', 'customer relationship', 'contacts', 'leads', 'deals'],
@@ -342,7 +329,7 @@ class IntentExtractor:
             if any(sig in text for sig in signatures):
                 return app_type
         return 'saas'
-    
+
     def _generate_app_name(self, prompt: str) -> str:
         stop_words = {'crm', 'user', 'admin', 'build', 'create', 'make', 'with', 'that', 'this', 'the', 'a', 'an', 'for', 'and', 'or', 'but', 'app', 'application'}
         words = [w for w in prompt.split() if len(w) > 3 and w.lower() not in stop_words]
