@@ -1,5 +1,5 @@
 """
-LLM layer — Hybrid: DeepSeek + Groq for generation, NVIDIA for review
+LLM layer — Hybrid: Groq (primary) + DeepSeek (fallback) for generation, NVIDIA for review
 Optimised for low latency, high accuracy, and free tier reliability.
 """
 
@@ -23,11 +23,10 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY")
 
 MODELS = {
-    # Primary generation model (DeepSeek-V4-Flash)
-    "generation": "deepseek-ai/deepseek-v4-flash",      # keep old key for compatibility
-    "generation_primary": "deepseek-ai/deepseek-v4-flash",
-    # Groq fallback models
-    "generation_groq_fast": "llama-3.1-8b-instant",
+    # Primary generation (Groq - fast)
+    "generation_primary": "llama-3.1-8b-instant",
+    # Fallback models
+    "generation_fallback": "deepseek-ai/deepseek-v4-flash",
     "generation_groq_quality": "llama-3.3-70b-versatile",
     # Review model (NVIDIA Llama 3.2 3B)
     "review": "meta/llama-3.2-3b-instruct",
@@ -122,20 +121,7 @@ def _json_structurally_different(a: str, b: str) -> bool:
     except Exception:
         return a.strip() != b.strip()
 
-# ── GENERATION (NVIDIA DeepSeek + Groq fallback) ────────────────────────────
-def _call_nvidia(messages, max_tokens, timeout=45):
-    client = _get_nvidia_client()
-    response = client.chat.completions.create(
-        model=MODELS["generation_primary"],
-        messages=messages,
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=max_tokens,
-        stream=False,
-        timeout=timeout,
-    )
-    return response.choices[0].message.content or ""
-
+# ── GENERATION (Groq primary, then DeepSeek, then Groq quality) ──────────────
 def _call_groq(messages, max_tokens, model_name, timeout=30):
     client = _get_groq_client()
     if client is None:
@@ -149,15 +135,42 @@ def _call_groq(messages, max_tokens, model_name, timeout=30):
     )
     return response.choices[0].message.content or ""
 
+def _call_nvidia(messages, max_tokens, timeout=45):
+    client = _get_nvidia_client()
+    response = client.chat.completions.create(
+        model=MODELS["generation_fallback"],
+        messages=messages,
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=max_tokens,
+        stream=False,
+        timeout=timeout,
+    )
+    return response.choices[0].message.content or ""
+
 def generate_with_llama(prompt: str, system_message: str,
-                        max_tokens: int = 2048) -> str:
+                        max_tokens: int = 1024) -> str:  # Reduced from 2048
+    """
+    Generate using Groq (primary) for speed, fallback to DeepSeek, then Groq quality.
+    """
     compressed = compress_prompt(prompt)
     messages = [
         {"role": "system", "content": system_message},
         {"role": "user",   "content": compressed},
     ]
 
-    # Try NVIDIA DeepSeek first
+    # Try Groq fast model first (fastest)
+    if GROQ_SDK_AVAILABLE and GROQ_API_KEY:
+        try:
+            t0 = time.time()
+            raw = _call_groq(messages, max_tokens, MODELS["generation_primary"], timeout=30)
+            logger.info(f"[Groq Fast] {len(raw)} chars in {time.time()-t0:.1f}s")
+            if raw.strip():
+                return repair_json(raw)
+        except Exception as e:
+            logger.warning(f"Groq fast generation failed: {e}. Falling back to DeepSeek.")
+
+    # Fallback to DeepSeek (NVIDIA)
     try:
         t0 = time.time()
         raw = _call_nvidia(messages, max_tokens, timeout=45)
@@ -165,20 +178,10 @@ def generate_with_llama(prompt: str, system_message: str,
         if raw.strip():
             return repair_json(raw)
     except Exception as e:
-        logger.warning(f"DeepSeek generation failed: {e}. Falling back to Groq.")
+        logger.warning(f"DeepSeek generation failed: {e}. Trying Groq quality...")
 
-    # Fallback to Groq (fast model)
+    # Final fallback: Groq quality model
     if GROQ_SDK_AVAILABLE and GROQ_API_KEY:
-        try:
-            t0 = time.time()
-            raw = _call_groq(messages, max_tokens, MODELS["generation_groq_fast"], timeout=30)
-            logger.info(f"[Groq Fast] {len(raw)} chars in {time.time()-t0:.1f}s")
-            if raw.strip():
-                return repair_json(raw)
-        except Exception as e:
-            logger.warning(f"Groq fast model failed: {e}. Trying quality model...")
-
-        # Try Groq quality model as second fallback
         try:
             t0 = time.time()
             raw = _call_groq(messages, max_tokens, MODELS["generation_groq_quality"], timeout=40)
@@ -188,7 +191,7 @@ def generate_with_llama(prompt: str, system_message: str,
         except Exception as e:
             logger.warning(f"Groq quality model failed: {e}")
 
-    raise RuntimeError("All generation providers failed (DeepSeek, Groq fast, Groq quality)")
+    raise RuntimeError("All generation providers failed (Groq fast, DeepSeek, Groq quality)")
 
 # ── REVIEW (NVIDIA only, with input type safety) ───────────────────────────
 def review_with_model(draft: str, review_task: str,
@@ -196,14 +199,12 @@ def review_with_model(draft: str, review_task: str,
     """
     Review using NVIDIA Llama 3.2 3B (fast, reliable).
     Returns (corrected_json_str, was_fixed).
-    
-    Handles both string and dict input (converts dict to JSON string).
+    Handles both string and dict input.
     """
-    # 🔧 FIX: If draft is a dict, convert to JSON string first
     if isinstance(draft, dict):
         draft = json.dumps(draft)
         logger.debug("Converted dict draft to JSON string for review.")
-    
+
     mini = minify_json(draft)
     system = (
         "JSON_CORRECTOR. Fix ONLY structural errors and missing required fields. "
