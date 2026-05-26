@@ -48,6 +48,17 @@ class SchemaGenerator:
         )
         os.makedirs(self.schema_dir, exist_ok=True)
 
+    def _dedupe_endpoints(self, endpoints: list) -> list:
+        """Remove duplicate endpoints based on (path, method)."""
+        seen = set()
+        unique = []
+        for ep in endpoints:
+            key = (ep.get("path"), ep.get("method"))
+            if key not in seen:
+                seen.add(key)
+                unique.append(ep)
+        return unique
+
     def generate_llm(self, system_design: Dict) -> Dict:
         """Rule‑based draft → MiniMax review and fix (without breaking data)."""
         draft = self.generate_rule_based(system_design)
@@ -66,6 +77,8 @@ class SchemaGenerator:
                 try:
                     fixed = json.loads(corrected)
                     draft = self._merge_schemas(draft, fixed)
+                    # Deduplicate endpoints after merging
+                    draft["api"]["endpoints"] = self._dedupe_endpoints(draft["api"]["endpoints"])
                     logger.info("Schema: MiniMax applied fixes (merged)")
                 except json.JSONDecodeError:
                     logger.warning("Schema: MiniMax output unparseable, keeping rule‑based draft")
@@ -103,19 +116,14 @@ class SchemaGenerator:
         # Helper to pluralise a singular noun (or detect already plural)
         def to_plural(word: str) -> str:
             lower = word.lower()
-            # If already ends with 's', assume it's plural (e.g., "Products" -> "products")
             if lower.endswith('s'):
                 return lower
-            # Irregulars
             if lower in ("person",):
                 return "people"
-            # Words ending with s, x, z, ch, sh -> add es
             if lower.endswith(("x", "z", "ch", "sh")):
                 return lower + "es"
-            # y -> ies (unless vowel before y)
             if lower.endswith("y") and lower[-2] not in "aeiou":
                 return lower[:-1] + "ies"
-            # Default: add s
             return lower + "s"
 
         for entity in entities:
@@ -190,34 +198,42 @@ class SchemaGenerator:
             ]
             logger.warning("No entities found, added default health endpoint")
 
+        # Deduplicate endpoints before returning
+        schemas["api"]["endpoints"] = self._dedupe_endpoints(schemas["api"]["endpoints"])
         return schemas
 
     def _merge_schemas(self, base: Dict, incoming: Dict) -> Dict:
-        """Merge incoming fixes into base, preserving all fields (no deletion)."""
+        """Merge incoming fixes into base, preserving existing fields but NOT adding new tables or endpoints."""
         if not isinstance(incoming, dict):
             return base
 
-        # Merge DB tables (add missing fields)
+        # DB tables: only merge fields into existing tables; ignore new tables
+        base_tables = base["db"]["tables"]
         for table_name, table_data in incoming.get("db", {}).get("tables", {}).items():
-            if table_name in base["db"]["tables"]:
-                base_fields = base["db"]["tables"][table_name].get("fields", {})
+            if table_name in base_tables:
+                base_fields = base_tables[table_name].get("fields", {})
                 for field_name, field_props in table_data.get("fields", {}).items():
                     if field_name not in base_fields:
                         base_fields[field_name] = field_props
             else:
-                base["db"]["tables"][table_name] = table_data
+                logger.debug(f"Ignoring new table '{table_name}' added by review (not in original design)")
 
-        # Merge relationships (append new ones)
+        # Relationships: only append new ones (no harm)
         for rel in incoming.get("db", {}).get("relationships", []):
             if rel not in base["db"]["relationships"]:
                 base["db"]["relationships"].append(rel)
 
-        # Merge API endpoints (append new ones)
+        # API endpoints: only keep those where the table exists in base DB
+        base_tables_set = set(base["db"]["tables"].keys())
         for ep in incoming.get("api", {}).get("endpoints", []):
-            if ep not in base["api"]["endpoints"]:
-                base["api"]["endpoints"].append(ep)
+            table = ep.get("table")
+            if table in base_tables_set:
+                if ep not in base["api"]["endpoints"]:
+                    base["api"]["endpoints"].append(ep)
+            else:
+                logger.debug(f"Ignoring endpoint for non‑existent table '{table}' added by review")
 
-        # Merge UI pages and routing (don't overwrite)
+        # UI pages and routing: add only if not already present
         for page_name, page_data in incoming.get("ui", {}).get("pages", {}).items():
             if page_name not in base["ui"]["pages"]:
                 base["ui"]["pages"][page_name] = page_data
@@ -225,7 +241,7 @@ class SchemaGenerator:
             if route not in base["ui"]["routing"]:
                 base["ui"]["routing"][route] = route_data
 
-        # Merge auth roles (add new roles)
+        # Auth roles: add new roles only if not present
         for role_name, perms in incoming.get("auth", {}).get("roles", {}).items():
             if role_name not in base["auth"]["roles"]:
                 base["auth"]["roles"][role_name] = perms
