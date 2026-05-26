@@ -1,8 +1,9 @@
 ```markdown
+```
 # AI Compiler – Software Generation from Natural Language
 
 > **From natural language to executable application configuration – a multi‑stage compiler with built‑in validation, repair, and simulation.**
-
+```
 ---
 ```
 ## 📌 Overview
@@ -27,7 +28,7 @@ The system is designed as a **true compiler** – not a single‑prompt LLM hack
 Enter any app description (e.g., *“Build a task manager with projects, tasks, and team member roles”*) and receive a full JSON configuration in ~20‑30 seconds.
 ```
 ---
-```
+
 ## 🧠 Architecture
 
 The compiler follows a **five‑stage pipeline**, mirroring traditional compiler design:
@@ -72,7 +73,7 @@ User Input (Natural Language)
 └─────────────────────────────────────────────────────────────┘
 
 Each stage is **independent, modular, and fallback‑aware**. If any LLM call fails (timeout, rate limit, invalid output), the system falls back to rule‑based logic, guaranteeing a **valid JSON output** for every request.
-```
+
 ---
 ```
 ## ⚙️ Key Features
@@ -158,7 +159,7 @@ Tested on **20 prompts** (10 real product ideas + 10 edge cases: vague, conflict
 All outputs are **valid, consistent, and executable** (simulation passes).
 ```
 ---
-```
+
 ## 🧩 Repository Structure
 
 
@@ -177,7 +178,7 @@ All outputs are **valid, consistent, and executable** (simulation passes).
 ├── main.py                       # FastAPI server
 ├── requirements.txt
 └── README.md
-```
+
 ```
 ---
 
@@ -208,7 +209,7 @@ All outputs are **valid, consistent, and executable** (simulation passes).
 5. **Open browser** → `http://localhost:8000`
 ```
 ---
-```
+
 ## 📄 License
 
 MIT – feel free to use, modify, and extend.
