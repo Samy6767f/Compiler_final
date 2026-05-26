@@ -1,9 +1,6 @@
 ```markdown
 # AI Compiler – Software Generation from Natural Language
 
-[![Live Demo](https://img.shields.io/badge/Live-Demo-blue)](https://compilerfinal-production-3ccc.up.railway.app/)
-[![GitHub license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-
 > **From natural language to executable application configuration – a multi‑stage compiler with built‑in validation, repair, and simulation.**
 
 ---
