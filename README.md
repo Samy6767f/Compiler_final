@@ -1,5 +1,5 @@
-```markdown
-```
+
+
 # AI Compiler – Software Generation from Natural Language
 
 > **From natural language to executable application configuration – a multi‑stage compiler with built‑in validation, repair, and simulation.**
