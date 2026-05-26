@@ -134,7 +134,6 @@ If all checks pass, `can_execute: true` – the configuration is **executable wi
 
 **Result:** Average latency **20‑30 seconds** on free tiers, 100% success rate (every prompt produces valid JSON).
 ```
----
 ```
 ## 📈 Evaluation Framework
 
@@ -209,13 +208,11 @@ All outputs are **valid, consistent, and executable** (simulation passes).
 
 5. **Open browser** → `http://localhost:8000`
 ```
----
 
 ## 📄 License
 
 MIT – feel free to use, modify, and extend.
 
----
 ```
 **Live URL:** [https://compilerfinal-production-3ccc.up.railway.app/](https://compilerfinal-production-3ccc.up.railway.app/)  
 **GitHub:** [https://github.com/Samy6767f/Compiler_final](https://github.com/Samy6767f/Compiler_final)
