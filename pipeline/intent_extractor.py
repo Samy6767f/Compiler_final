@@ -80,7 +80,12 @@ class IntentExtractor:
                 "1. DO NOT simplify roles. If a user asks for 'GlobalAdmin' and 'ClinicManager', do not merge them into a generic 'user' or 'admin'.\n"
                 "2. Extract custom database fields, tracking keys, structural hierarchies (e.g. self-referencing relationship joins), and complex conditional validation rules entirely.\n"
                 "3. Explicitly list any discovered third-party integrations under 'integrations'.\n"
-                "4. Populate the 'ambiguities' or 'assumptions' tracking blocks if critical configuration details are missing.\n\n"
+                "4. Populate the 'ambiguities' or 'assumptions' tracking blocks if critical configuration details are missing.\n"
+                "5. If the user intent is vague or incomplete, still produce a minimal but complete IR:\n"
+                "   - Include at least one entity (e.g., 'Item').\n"
+                "   - Include at least one role (e.g., 'user' with 'read' permission).\n"
+                "   - Include a plausible app_type based on keywords.\n"
+                "   - Never omit any of the required top-level fields.\n\n"
                 "Output ONLY a raw, minified JSON object matching this exact schema structure without markdown wrappers or explanation block strings:\n"
                 "{\n"
                 "  \"app_name\": \"String\",\n"
@@ -123,6 +128,17 @@ class IntentExtractor:
         for key in required_keys:
             if key not in ir or not isinstance(ir[key], list):
                 ir[key] = []
+        
+        # Add default content if empty (ensures minimal completeness)
+        if not ir["entities"]:
+            ir["entities"] = ["Item"]
+            ir["assumptions"].append("Added default entity 'Item' because none were extracted")
+        if not ir["roles"]:
+            ir["roles"] = [{"name": "user", "permissions": ["read"]}]
+            ir["assumptions"].append("Added default 'user' role because none were extracted")
+        if not ir["features"]:
+            ir["features"] = ["Basic CRUD Operations"]
+            ir["assumptions"].append("Added basic CRUD feature because none were extracted")
         
         if "app_name" not in ir or not ir["app_name"] or ir["app_name"] in ["MyApp", "App"]:
             ir["app_name"] = "GeneratedEnterpriseApp"
