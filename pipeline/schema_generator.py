@@ -50,10 +50,8 @@ class SchemaGenerator:
 
     def generate_llm(self, system_design: Dict) -> Dict:
         """Rule‑based draft → MiniMax review and fix (without breaking data)."""
-        # 1. Always start with rule‑based (complete)
         draft = self.generate_rule_based(system_design)
 
-        # 2. Optional LLM review – only to fix minor errors, never empty existing fields
         try:
             from pipeline.llm import review_with_model, minify_json
             draft_json = json.dumps(draft)
@@ -67,7 +65,6 @@ class SchemaGenerator:
             if was_fixed:
                 try:
                     fixed = json.loads(corrected)
-                    # Merge: keep existing if review deleted something
                     draft = self._merge_schemas(draft, fixed)
                     logger.info("Schema: MiniMax applied fixes (merged)")
                 except json.JSONDecodeError:
@@ -94,7 +91,6 @@ class SchemaGenerator:
         }
 
         role_names = [r.get("name", "") for r in roles if isinstance(r.get("name"), str)]
-        # Ensure at least one role
         if not role_names:
             role_names = ["user", "admin"]
             schemas["auth"]["roles"] = {"user": ["read"], "admin": ["create", "read", "update", "delete"]}
@@ -103,6 +99,24 @@ class SchemaGenerator:
                 rn = role.get("name", "user")
                 perms = role.get("permissions", ["read"])
                 schemas["auth"]["roles"][rn] = perms
+
+        # Helper to pluralise a singular noun (or detect already plural)
+        def to_plural(word: str) -> str:
+            lower = word.lower()
+            # If already ends with 's', assume it's plural (e.g., "Products" -> "products")
+            if lower.endswith('s'):
+                return lower
+            # Irregulars
+            if lower in ("person",):
+                return "people"
+            # Words ending with s, x, z, ch, sh -> add es
+            if lower.endswith(("x", "z", "ch", "sh")):
+                return lower + "es"
+            # y -> ies (unless vowel before y)
+            if lower.endswith("y") and lower[-2] not in "aeiou":
+                return lower[:-1] + "ies"
+            # Default: add s
+            return lower + "s"
 
         for entity in entities:
             name   = entity.get("name", "Unknown")
@@ -129,7 +143,7 @@ class SchemaGenerator:
 
             schemas["db"]["tables"][name] = {"fields": table_fields}
 
-            # Relationships
+            # Relationships (from system design)
             for rel in rels:
                 if isinstance(rel, dict) and rel.get("target") and rel.get("foreign_key"):
                     schemas["db"]["relationships"].append({
@@ -139,13 +153,8 @@ class SchemaGenerator:
                         "foreign_key": rel.get("foreign_key"),
                     })
 
-            # Determine plural route segment
-            lower = name.lower()
-            if lower in ("person",): plural = "people"
-            elif lower.endswith(("s","x","z","ch","sh")): plural = lower + "es"
-            elif lower.endswith("y") and lower[-2] not in "aeiou": plural = lower[:-1] + "ies"
-            else: plural = lower + "s"
-
+            # API endpoints with proper pluralisation
+            plural = to_plural(name)
             write_roles = ["admin"] if "admin" in role_names else role_names[:1] or ["admin"]
             read_roles = role_names if role_names else ["admin", "user"]
 
@@ -171,11 +180,10 @@ class SchemaGenerator:
                     "allowed_roles": page.get("allowed_roles", role_names or ["user"]),
                 }
         else:
-            # Fallback: create at least Dashboard if no pages defined
             schemas["ui"]["pages"]["Dashboard"] = {"route": "/dashboard", "components": ["StatsCard", "Table"]}
             schemas["ui"]["routing"]["/dashboard"] = {"page": "Dashboard", "allowed_roles": role_names or ["user"]}
 
-        # Ensure API endpoints exist (if zero, add a default)
+        # Default API endpoint if nothing exists
         if not schemas["api"]["endpoints"]:
             schemas["api"]["endpoints"] = [
                 {"path": "/health", "method": "GET", "roles": ["guest"], "table": "none"}
@@ -188,35 +196,40 @@ class SchemaGenerator:
         """Merge incoming fixes into base, preserving all fields (no deletion)."""
         if not isinstance(incoming, dict):
             return base
-        # Merge db tables (keep all tables from base, update fields only if incoming has them)
+
+        # Merge DB tables (add missing fields)
         for table_name, table_data in incoming.get("db", {}).get("tables", {}).items():
             if table_name in base["db"]["tables"]:
-                # Merge fields
                 base_fields = base["db"]["tables"][table_name].get("fields", {})
                 for field_name, field_props in table_data.get("fields", {}).items():
                     if field_name not in base_fields:
                         base_fields[field_name] = field_props
             else:
                 base["db"]["tables"][table_name] = table_data
+
         # Merge relationships (append new ones)
         for rel in incoming.get("db", {}).get("relationships", []):
             if rel not in base["db"]["relationships"]:
                 base["db"]["relationships"].append(rel)
+
         # Merge API endpoints (append new ones)
         for ep in incoming.get("api", {}).get("endpoints", []):
             if ep not in base["api"]["endpoints"]:
                 base["api"]["endpoints"].append(ep)
-        # Merge UI pages and routing (don't overwrite existing)
+
+        # Merge UI pages and routing (don't overwrite)
         for page_name, page_data in incoming.get("ui", {}).get("pages", {}).items():
             if page_name not in base["ui"]["pages"]:
                 base["ui"]["pages"][page_name] = page_data
         for route, route_data in incoming.get("ui", {}).get("routing", {}).items():
             if route not in base["ui"]["routing"]:
                 base["ui"]["routing"][route] = route_data
+
         # Merge auth roles (add new roles)
         for role_name, perms in incoming.get("auth", {}).get("roles", {}).items():
             if role_name not in base["auth"]["roles"]:
                 base["auth"]["roles"][role_name] = perms
+
         return base
 
     def _save_schemas(self, schemas: Dict) -> None:
