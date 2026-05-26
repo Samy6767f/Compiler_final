@@ -18,6 +18,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Check for required API keys at startup (non‑fatal)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    logger.warning("GEMINI_API_KEY not set. Review stage will fall back to slower NVIDIA model.")
+else:
+    logger.info("GEMINI_API_KEY found. Review stage will use Gemini for ultra‑fast corrections.")
+
 try:
     from pipeline.orchestrator import Pipeline
     pipeline_llm = Pipeline(use_llm=True)
@@ -87,7 +94,11 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "pipeline": pipeline_llm is not None}
+    return {
+        "status": "ok",
+        "pipeline": pipeline_llm is not None,
+        "gemini_available": GEMINI_API_KEY is not None
+    }
 
 @app.post("/compile")
 async def compile_endpoint(req: CompileRequest, bg: BackgroundTasks):
@@ -138,11 +149,9 @@ def _flatten_validation_errors(raw_errors: Any) -> List[str]:
             flat.extend(_flatten_validation_errors(item))
         return flat
     if isinstance(raw_errors, dict):
-        # If dict, take values (might be errors dict)
         for val in raw_errors.values():
             flat.extend(_flatten_validation_errors(val))
         return flat
-    # Fallback: convert to string
     return [str(raw_errors)]
 
 
@@ -201,10 +210,8 @@ async def run_pipeline(prompt: str, request_id: str, tracker: ProgressTracker):
         )
         stage_timings["4_validation_refinement"] = ms(ts)
 
-        # Flatten any nested structure into a list of strings
         flat_errors = _flatten_validation_errors(raw_errors)
 
-        # Separate issues (critical) from notes (warnings/info)
         keywords = ("undefined", "missing", "no ", "invalid", "failed", "mismatch")
         issues = []
         notes = []
@@ -225,7 +232,6 @@ async def run_pipeline(prompt: str, request_id: str, tracker: ProgressTracker):
         simulation = await asyncio.get_event_loop().run_in_executor(
             None, lambda: pipeline_llm.simulator.simulate_execution(schemas)
         )
-        # Merge validation issues into simulation fails so UI shows them
         simulation.setdefault("checks_failed", [])
         if isinstance(simulation["checks_failed"], list):
             simulation["checks_failed"].extend(issues)
@@ -236,7 +242,6 @@ async def run_pipeline(prompt: str, request_id: str, tracker: ProgressTracker):
 
         latency = round((time.time() - t0) * 1000, 1)
 
-        # ── Build result in shape www/index.html expects ──────────────────────
         result = {
             "success":           simulation.get("can_execute", True) and not issues,
             "request_id":        request_id,
