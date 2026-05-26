@@ -7,6 +7,31 @@ from pipeline.llm import generate_with_llama, review_with_model
 
 logger = logging.getLogger("ai-compiler")
 
+# ---------- Local safe_title helper ----------
+def safe_title(value: Any) -> str:
+    """Convert value to title case safely, handling dicts and non‑strings."""
+    if isinstance(value, dict):
+        # Try to extract first string value
+        for v in value.values():
+            if isinstance(v, str):
+                return v.title()
+        return "Unknown"
+    if isinstance(value, str):
+        return value.title()
+    return str(value).title()
+
+def safe_lower(value: Any) -> str:
+    """Convert value to lower case safely."""
+    if isinstance(value, dict):
+        for v in value.values():
+            if isinstance(v, str):
+                return v.lower()
+        return ""
+    if isinstance(value, str):
+        return value.lower()
+    return str(value).lower()
+
+
 class SystemDesigner:
     # Move schema inside the class to avoid global scope issues
     SYSTEM_DESIGN_SCHEMA = {
@@ -256,6 +281,24 @@ Required Format Shape:
     def _design_entities(self, intent: Dict) -> List[Dict]:
         entities = []
         entity_names = intent.get("entities", [])
+        # Safety: ensure each entity name is a string
+        safe_entity_names = []
+        for e in entity_names:
+            if isinstance(e, dict):
+                # Try to extract a string value (e.g., {"name": "User"})
+                extracted = None
+                for v in e.values():
+                    if isinstance(v, str):
+                        extracted = v
+                        break
+                if extracted is None:
+                    extracted = str(e)
+                safe_entity_names.append(extracted)
+            elif isinstance(e, str):
+                safe_entity_names.append(e)
+            else:
+                safe_entity_names.append(str(e))
+
         base_fields = {
             'users': ['id:uuid', 'email:string', 'password_hash:string', 'role:enum', 'created_at:timestamp', 'updated_at:timestamp'],
             'contacts': ['id:uuid', 'name:string', 'email:string', 'phone:string', 'company:string', 'created_at:timestamp', 'updated_at:timestamp'],
@@ -269,19 +312,19 @@ Required Format Shape:
             'patients': ['id:uuid', 'name:string', 'email:string', 'phone:string', 'clinic_id:uuid', 'created_at:timestamp', 'updated_at:timestamp'],
             'medical_records': ['id:uuid', 'patient_id:uuid', 'doctor_id:uuid', 'diagnosis:text', 'created_at:timestamp', 'updated_at:timestamp'],
         }
-        has_multi_tenant = any('clinic' in e.lower() or 'tenant' in e.lower() for e in entity_names)
-        for name in entity_names:
-            name_lower = name.lower()
+        has_multi_tenant = any('clinic' in e.lower() or 'tenant' in e.lower() for e in safe_entity_names)
+        for name in safe_entity_names:
+            name_lower = safe_lower(name)
             fields = base_fields.get(name_lower, ['id:uuid', 'name:string', 'created_at:timestamp', 'updated_at:timestamp'])
             relations = []
             if has_multi_tenant and name_lower not in ['clinics', 'tenants']:
                 relations.append({"target": "Clinics", "type": "many-to-one", "foreign_key": "clinic_id"})
             if name_lower in ['doctors', 'patients', 'medical_records']:
-                if 'Doctors' not in entity_names and 'doctors' not in entity_names:
+                if 'Doctors' not in safe_entity_names and 'doctors' not in safe_entity_names:
                     relations.append({"target": "Doctors", "type": "many-to-one", "foreign_key": "doctor_id"})
-                if 'Patients' not in entity_names and 'patients' not in entity_names:
+                if 'Patients' not in safe_entity_names and 'patients' not in safe_entity_names:
                     relations.append({"target": "Patients", "type": "many-to-one", "foreign_key": "patient_id"})
-            entities.append({"name": name.title(), "fields": fields, "relations": relations})
+            entities.append({"name": safe_title(name), "fields": fields, "relations": relations})
         if not entities:
             entities.append({"name": "Item", "fields": ['id:uuid', 'name:string', 'created_at:timestamp', 'updated_at:timestamp'], "relations": []})
         return entities
@@ -293,6 +336,16 @@ Required Format Shape:
             name = role.get("name", "user") if isinstance(role, dict) else role
             if isinstance(name, list):
                 name = name[0] if name else "user"
+            elif isinstance(name, dict):
+                # Extract first string from dict
+                extracted = None
+                for v in name.values():
+                    if isinstance(v, str):
+                        extracted = v
+                        break
+                name = extracted if extracted else "user"
+            if not isinstance(name, str):
+                name = str(name)
             if name == "admin":
                 perms = ["create", "read", "update", "delete", "admin"]
             elif name == "guest":
@@ -322,6 +375,13 @@ Required Format Shape:
             name = r.get("name")
             if isinstance(name, list):
                 name = name[0] if name else "unknown"
+            elif isinstance(name, dict):
+                extracted = None
+                for v in name.values():
+                    if isinstance(v, str):
+                        extracted = v
+                        break
+                name = extracted if extracted else "unknown"
             elif not isinstance(name, str):
                 name = str(name)
             role_names.append(name)
@@ -345,6 +405,13 @@ Required Format Shape:
             name = r.get("name")
             if isinstance(name, list):
                 name = name[0] if name else "user"
+            elif isinstance(name, dict):
+                extracted = None
+                for v in name.values():
+                    if isinstance(v, str):
+                        extracted = v
+                        break
+                name = extracted if extracted else "user"
             elif not isinstance(name, str):
                 name = str(name)
             role_names.append(name)
@@ -354,7 +421,10 @@ Required Format Shape:
         ]
         for entity in entities:
             entity_name = entity["name"]
-            lower = entity_name.lower()
+            # Ensure entity_name is a string
+            if not isinstance(entity_name, str):
+                entity_name = str(entity_name)
+            lower = safe_lower(entity_name)
             if lower.endswith("s"):
                 plural = lower
             elif lower.endswith("y"):
@@ -362,13 +432,13 @@ Required Format Shape:
             else:
                 plural = lower + "s"
             pages.append({
-                "name": f"{entity_name} List",
+                "name": f"{safe_title(entity_name)} List",
                 "route": f"/{plural}",
                 "allowed_roles": role_names if role_names else ["user", "admin"],
                 "components": ["Table", "SearchInput", "CreateButton"]
             })
             pages.append({
-                "name": f"{entity_name} Form",
+                "name": f"{safe_title(entity_name)} Form",
                 "route": f"/{plural}/new",
                 "allowed_roles": role_names if "admin" in role_names else role_names,
                 "components": ["Form", "SubmitButton"]
